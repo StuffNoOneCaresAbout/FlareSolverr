@@ -1,10 +1,11 @@
+import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from uuid import uuid1
 
-from selenium.webdriver.chrome.webdriver import WebDriver
+import zendriver as zd
 
 import utils
 
@@ -12,73 +13,86 @@ import utils
 @dataclass
 class Session:
     session_id: str
-    driver: WebDriver
-    created_at: datetime
+    browser: zd.Browser
+    tab: Optional[zd.Tab] = field(default=None)
+    created_at: datetime = field(default_factory=datetime.now)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def lifetime(self) -> timedelta:
         return datetime.now() - self.created_at
 
 
 class SessionsStorage:
-    """SessionsStorage creates, stores and process all the sessions"""
+    """SessionsStorage creates, stores and process all the sessions."""
 
     def __init__(self):
         self.sessions = {}
+        self._registry_lock = asyncio.Lock()
 
-    def create(self, session_id: Optional[str] = None, proxy: Optional[dict] = None,
-               force_new: Optional[bool] = False) -> Tuple[Session, bool]:
-        """create creates new instance of WebDriver if necessary,
-        assign defined (or newly generated) session_id to the instance
-        and returns the session object. If a new session has been created
-        second argument is set to True.
+    async def create(self, session_id: Optional[str] = None, proxy: Optional[dict] = None,
+                     force_new: Optional[bool] = False) -> Tuple[Session, bool]:
+        """
+        Create a new browser-backed session.
 
-        Note: The function is idempotent, so in case if session_id
-        already exists in the storage a new instance of WebDriver won't be created
-        and existing session will be returned. Second argument defines if 
-        new session has been created (True) or an existing one was used (False).
+        The function is idempotent: if ``session_id`` already exists a new
+        browser will not be launched and the existing session is returned.
+        ``force_new=True`` will close and recreate the session regardless.
         """
         session_id = session_id or str(uuid1())
 
-        if force_new:
-            self.destroy(session_id)
+        async with self._registry_lock:
+            if force_new:
+                await self._close(session_id)
 
-        if self.exists(session_id):
-            return self.sessions[session_id], False
+            existing = self.sessions.get(session_id)
+            if existing is not None:
+                return existing, False
 
-        driver = utils.get_webdriver(proxy)
-        created_at = datetime.now()
-        session = Session(session_id, driver, created_at)
-
-        self.sessions[session_id] = session
-
-        return session, True
+            browser = await utils.get_browser(proxy)
+            tab = browser.main_tab
+            if tab is None:
+                tab = await browser.get('about:blank')
+            session = Session(session_id=session_id, browser=browser, tab=tab)
+            self.sessions[session_id] = session
+            return session, True
 
     def exists(self, session_id: str) -> bool:
         return session_id in self.sessions
 
-    def destroy(self, session_id: str) -> bool:
-        """destroy closes the driver instance and removes session from the storage.
-        The function is noop if session_id doesn't exist.
-        The function returns True if session was found and destroyed,
-        and False if session_id wasn't found.
-        """
-        if not self.exists(session_id):
-            return False
+    async def destroy(self, session_id: str) -> bool:
+        """Close the browser for ``session_id`` and remove it from storage."""
+        async with self._registry_lock:
+            return await self._close(session_id)
 
-        session = self.sessions.pop(session_id)
-        if utils.PLATFORM_VERSION == "nt":
-            session.driver.close()
-        session.driver.quit()
+    async def _close(self, session_id: str) -> bool:
+        session = self.sessions.pop(session_id, None)
+        if session is None:
+            return False
+        try:
+            await session.browser.stop()
+        except Exception as e:
+            logging.debug('Error stopping session browser: %s', e)
         return True
 
-    def get(self, session_id: str, ttl: Optional[timedelta] = None) -> Tuple[Session, bool]:
-        session, fresh = self.create(session_id)
+    async def get(self, session_id: str, ttl: Optional[timedelta] = None) -> Tuple[Session, bool]:
+        session, fresh = await self.create(session_id)
 
         if ttl is not None and not fresh and session.lifetime() > ttl:
-            logging.debug(f'session\'s lifetime has expired, so the session is recreated (session_id={session_id})')
-            session, fresh = self.create(session_id, force_new=True)
+            logging.debug(f"session's lifetime has expired, so the session is recreated "
+                          f"(session_id={session_id})")
+            session, fresh = await self.create(session_id, force_new=True)
 
         return session, fresh
 
     def session_ids(self) -> list[str]:
         return list(self.sessions.keys())
+
+    async def stop_all(self) -> None:
+        """Close every active session. Used during server shutdown."""
+        async with self._registry_lock:
+            session_ids = list(self.sessions.keys())
+        for sid in session_ids:
+            await self.destroy(sid)
+
+
+SESSIONS_STORAGE = SessionsStorage()

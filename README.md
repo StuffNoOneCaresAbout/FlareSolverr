@@ -14,11 +14,15 @@ FlareSolverr is a proxy server to bypass Cloudflare and DDoS-GUARD protection.
 ## How it works
 
 FlareSolverr starts a proxy server, and it waits for user requests in an idle state using few resources.
-When some request arrives, it uses [Selenium](https://www.selenium.dev) with the
-[undetected-chromedriver](https://github.com/ultrafunkamsterdam/undetected-chromedriver)
-to create a web browser (Chrome). It opens the URL with user parameters and waits until the Cloudflare challenge
-is solved (or timeout). The HTML code and the cookies are sent back to the user, and those cookies can be used to
-bypass Cloudflare using other HTTP clients.
+When some request arrives, it uses [zendriver](https://github.com/cdpdriver/zendriver) — an async
+browser automation library built on the Chrome DevTools Protocol — to launch a real browser
+(Chromium/Chrome). It opens the URL with user parameters and waits until the Cloudflare challenge
+is solved (or timeout). zendriver ships with a built-in Cloudflare solver (`zendriver.core.cloudflare.verify_cf`)
+that handles the interactive Turnstile checkbox automatically. The HTML code and the cookies are sent
+back to the user, and those cookies can be used to bypass Cloudflare using other HTTP clients.
+
+The challenge-resolution code is implemented as `async` coroutines that run on a per-request
+event loop driven by `asyncio.run()` from the synchronous bottle HTTP layer.
 
 **NOTE**: Web browsers consume a lot of memory. If you are running FlareSolverr on a machine with few RAM, do not make
 many requests at once. With each request a new browser is launched.
@@ -89,20 +93,29 @@ This is the recommended way for Windows users.
 > **Warning**
 > Installing from source code only works for x64 architecture. For other architectures see Docker images.
 
-- Install [Python 3.11](https://www.python.org/downloads/).
+- Install [uv](https://docs.astral.sh/uv/) (or use the bundled `pip`).
 - Install [Chrome](https://www.google.com/intl/en_us/chrome/) (all OS) or [Chromium](https://www.chromium.org/getting-involved/download-chromium/) (just Linux, it doesn't work in Windows) web browser.
 - (Only in Linux) Install [Xvfb](https://en.wikipedia.org/wiki/Xvfb) package.
 - (Only in macOS) Install [XQuartz](https://www.xquartz.org/) package.
 - Clone this repository and open a shell in that path.
-- Run `pip install -r requirements.txt` command to install FlareSolverr dependencies.
-- Run `python src/flaresolverr.py` command to start FlareSolverr.
+- Run `uv sync` to create a virtualenv and install FlareSolverr's dependencies from `pyproject.toml`.
+- Run `uv run python src/flaresolverr.py` command to start FlareSolverr.
+
+If you prefer a regular `venv` + `pip` workflow, you can also run:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+python src/flaresolverr.py
+```
 
 ### From source code (FreeBSD/TrueNAS CORE)
 
-- Run `pkg install chromium python313 py311-pip xorg-vfbserver` command to install the required dependencies.
+- Run `pkg install chromium python313 py311-pip xorg-vfbserver uv` command to install the required dependencies.
 - Clone this repository and open a shell in that path.
-- Run `python3.11 -m pip install -r requirements.txt` command to install FlareSolverr dependencies.
-- Run `python3.11 src/flaresolverr.py` command to start FlareSolverr.
+- Run `uv sync` to create a virtualenv and install FlareSolverr's dependencies.
+- Run `uv run python src/flaresolverr.py` command to start FlareSolverr.
 
 ### Systemd service
 
@@ -344,4 +357,10 @@ to the file name of one of the adapters inside the `/captcha` directory.
 ## Related projects
 
 - C# implementation => https://github.com/FlareSolverr/FlareSolverrSharp
+
+## License
+
+GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`). This project
+depends on [zendriver](https://github.com/cdpdriver/zendriver), which is also licensed
+under AGPL-3.0. See `LICENSE` for the full text.
 

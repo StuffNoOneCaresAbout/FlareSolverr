@@ -1,23 +1,20 @@
+import asyncio
 import json
 import logging
 import os
 import platform
 import re
-import shutil
-import sys
-import tempfile
 import urllib.parse
+from html import escape
+from urllib.parse import quote, unquote
 
-from selenium.webdriver.chrome.webdriver import WebDriver
-import undetected_chromedriver as uc
+import zendriver as zd
+from zendriver.cdp import fetch, network
 
 FLARESOLVERR_VERSION = None
 PLATFORM_VERSION = None
-CHROME_EXE_PATH = None
-CHROME_MAJOR_VERSION = None
 USER_AGENT = None
 XVFB_DISPLAY = None
-PATCHED_DRIVER_PATH = None
 
 
 def get_config_log_html() -> bool:
@@ -44,6 +41,7 @@ def get_flaresolverr_version() -> str:
         FLARESOLVERR_VERSION = json.loads(f.read())['version']
         return FLARESOLVERR_VERSION
 
+
 def get_current_platform() -> str:
     global PLATFORM_VERSION
     if PLATFORM_VERSION is not None:
@@ -52,290 +50,12 @@ def get_current_platform() -> str:
     return PLATFORM_VERSION
 
 
-def create_proxy_extension(proxy: dict) -> str:
-    parsed_url = urllib.parse.urlparse(proxy['url'])
-    scheme = parsed_url.scheme
-    host = parsed_url.hostname
-    port = parsed_url.port
-    username = proxy['username']
-    password = proxy['password']
-    manifest_json = """
-    {
-        "version": "1.0.0",
-        "manifest_version": 3,
-        "name": "Chrome Proxy",
-        "permissions": [
-            "proxy",
-            "tabs",
-            "storage",
-            "webRequest",
-            "webRequestAuthProvider"
-        ],
-        "host_permissions": [
-          "<all_urls>"
-        ],
-        "background": {
-          "service_worker": "background.js"
-        },
-        "minimum_chrome_version": "76.0.0"
-    }
-    """
-
-    background_js = """
-    var config = {
-        mode: "fixed_servers",
-        rules: {
-            singleProxy: {
-                scheme: "%s",
-                host: "%s",
-                port: %d
-            },
-            bypassList: ["localhost"]
-        }
-    };
-
-    chrome.proxy.settings.set({value: config, scope: "regular"}, function() {});
-
-    function callbackFn(details) {
-        return {
-            authCredentials: {
-                username: "%s",
-                password: "%s"
-            }
-        };
-    }
-
-    chrome.webRequest.onAuthRequired.addListener(
-        callbackFn,
-        { urls: ["<all_urls>"] },
-        ['blocking']
-    );
-    """ % (
-        scheme,
-        host,
-        port,
-        username,
-        password
-    )
-
-    proxy_extension_dir = tempfile.mkdtemp()
-
-    with open(os.path.join(proxy_extension_dir, "manifest.json"), "w") as f:
-        f.write(manifest_json)
-
-    with open(os.path.join(proxy_extension_dir, "background.js"), "w") as f:
-        f.write(background_js)
-
-    return proxy_extension_dir
-
-
-def get_webdriver(proxy: dict = None) -> WebDriver:
-    global PATCHED_DRIVER_PATH, USER_AGENT
-    logging.debug('Launching web browser...')
-
-    # undetected_chromedriver
-    options = uc.ChromeOptions()
-    options.add_argument('--no-sandbox')
-    options.add_argument('--window-size=1920,1080')
-    options.add_argument('--disable-search-engine-choice-screen')
-    # todo: this param shows a warning in chrome head-full
-    options.add_argument('--disable-setuid-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    # this option removes the zygote sandbox (it seems that the resolution is a bit faster)
-    options.add_argument('--no-zygote')
-    # attempt to fix Docker ARM32 build
-    IS_ARMARCH = platform.machine().startswith(('arm', 'aarch'))
-    if IS_ARMARCH:
-        options.add_argument('--disable-gpu-sandbox')
-    options.add_argument('--ignore-certificate-errors')
-    options.add_argument('--ignore-ssl-errors')
-    # disable breaking popup
-    options.add_argument("--disable-features=LocalNetworkAccessChecks")
-
-    language = os.environ.get('LANG', None)
-    if language is not None:
-        options.add_argument('--accept-lang=%s' % language)
-
-    # Fix for Chrome 117 | https://github.com/FlareSolverr/FlareSolverr/issues/910
-    if USER_AGENT is not None:
-        options.add_argument('--user-agent=%s' % USER_AGENT)
-
-    proxy_extension_dir = None
-    if proxy and all(key in proxy for key in ['url', 'username', 'password']):
-        proxy_extension_dir = create_proxy_extension(proxy)
-        options.add_argument("--disable-features=DisableLoadExtensionCommandLineSwitch")
-        options.add_argument("--load-extension=%s" % os.path.abspath(proxy_extension_dir))
-    elif proxy and 'url' in proxy:
-        proxy_url = proxy['url']
-        logging.debug("Using webdriver proxy: %s", proxy_url)
-        options.add_argument('--proxy-server=%s' % proxy_url)
-
-    # note: headless mode is detected (headless = True)
-    # we launch the browser in head-full mode with the window hidden
-    windows_headless = False
-    if get_config_headless():
-        if os.name == 'nt':
-            windows_headless = True
-        else:
-            start_xvfb_display()
-    # For normal headless mode:
-    # options.add_argument('--headless')
-
-    # if we are inside the Docker container, we avoid downloading the driver
-    driver_exe_path = None
-    version_main = None
-    if os.path.exists("/app/chromedriver"):
-        # running inside Docker
-        driver_exe_path = "/app/chromedriver"
-    else:
-        version_main = get_chrome_major_version()
-        if PATCHED_DRIVER_PATH is not None:
-            driver_exe_path = PATCHED_DRIVER_PATH
-
-    # detect chrome path
-    browser_executable_path = get_chrome_exe_path()
-
-    # downloads and patches the chromedriver
-    # if we don't set driver_executable_path it downloads, patches, and deletes the driver each time
-    try:
-        driver = uc.Chrome(options=options, browser_executable_path=browser_executable_path,
-                           driver_executable_path=driver_exe_path, version_main=version_main,
-                           windows_headless=windows_headless, headless=get_config_headless())
-    except Exception as e:
-        logging.error("Error starting Chrome: %s" % e)
-        # No point in continuing if we cannot retrieve the driver
-        raise e
-
-    # save the patched driver to avoid re-downloads
-    if driver_exe_path is None:
-        PATCHED_DRIVER_PATH = os.path.join(driver.patcher.data_path, driver.patcher.exe_name)
-        if PATCHED_DRIVER_PATH != driver.patcher.executable_path:
-            shutil.copy(driver.patcher.executable_path, PATCHED_DRIVER_PATH)
-
-    # clean up proxy extension directory
-    if proxy_extension_dir is not None:
-        shutil.rmtree(proxy_extension_dir)
-
-    # selenium vanilla
-    # options = webdriver.ChromeOptions()
-    # options.add_argument('--no-sandbox')
-    # options.add_argument('--window-size=1920,1080')
-    # options.add_argument('--disable-setuid-sandbox')
-    # options.add_argument('--disable-dev-shm-usage')
-    # driver = webdriver.Chrome(options=options)
-
-    return driver
-
-
-def get_chrome_exe_path() -> str:
-    global CHROME_EXE_PATH
-    if CHROME_EXE_PATH is not None:
-        return CHROME_EXE_PATH
-    # linux pyinstaller bundle
-    chrome_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chrome', "chrome")
-    if os.path.exists(chrome_path):
-        if not os.access(chrome_path, os.X_OK):
-            raise Exception(f'Chrome binary "{chrome_path}" is not executable. '
-                            f'Please, extract the archive with "tar xzf <file.tar.gz>".')
-        CHROME_EXE_PATH = chrome_path
-        return CHROME_EXE_PATH
-    # windows pyinstaller bundle
-    chrome_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chrome', "chrome.exe")
-    if os.path.exists(chrome_path):
-        CHROME_EXE_PATH = chrome_path
-        return CHROME_EXE_PATH
-    # system
-    CHROME_EXE_PATH = uc.find_chrome_executable()
-    return CHROME_EXE_PATH
-
-
-def get_chrome_major_version() -> str:
-    global CHROME_MAJOR_VERSION
-    if CHROME_MAJOR_VERSION is not None:
-        return CHROME_MAJOR_VERSION
-
-    if os.name == 'nt':
-        # Example: '104.0.5112.79'
-        try:
-            complete_version = extract_version_nt_executable(get_chrome_exe_path())
-        except Exception:
-            try:
-                complete_version = extract_version_nt_registry()
-            except Exception:
-                # Example: '104.0.5112.79'
-                complete_version = extract_version_nt_folder()
-    else:
-        chrome_path = get_chrome_exe_path()
-        process = os.popen(f'"{chrome_path}" --version')
-        # Example 1: 'Chromium 104.0.5112.79 Arch Linux\n'
-        # Example 2: 'Google Chrome 104.0.5112.79 Arch Linux\n'
-        complete_version = process.read()
-        process.close()
-
-    CHROME_MAJOR_VERSION = complete_version.split('.')[0].split(' ')[-1]
-    return CHROME_MAJOR_VERSION
-
-
-def extract_version_nt_executable(exe_path: str) -> str:
-    import pefile
-    pe = pefile.PE(exe_path, fast_load=True)
-    pe.parse_data_directories(
-        directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]]
-    )
-    return pe.FileInfo[0][0].StringTable[0].entries[b"FileVersion"].decode('utf-8')
-
-
-def extract_version_nt_registry() -> str:
-    stream = os.popen(
-        'reg query "HKLM\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Google Chrome"')
-    output = stream.read()
-    google_version = ''
-    for letter in output[output.rindex('DisplayVersion    REG_SZ') + 24:]:
-        if letter != '\n':
-            google_version += letter
-        else:
-            break
-    return google_version.strip()
-
-
-def extract_version_nt_folder() -> str:
-    # Check if the Chrome folder exists in the x32 or x64 Program Files folders.
-    for i in range(2):
-        path = 'C:\\Program Files' + (' (x86)' if i else '') + '\\Google\\Chrome\\Application'
-        if os.path.isdir(path):
-            paths = [f.path for f in os.scandir(path) if f.is_dir()]
-            for path in paths:
-                filename = os.path.basename(path)
-                pattern = r'\d+\.\d+\.\d+\.\d+'
-                match = re.search(pattern, filename)
-                if match and match.group():
-                    # Found a Chrome version.
-                    return match.group(0)
-    return ''
-
-
-def get_user_agent(driver=None) -> str:
-    global USER_AGENT
-    if USER_AGENT is not None:
-        return USER_AGENT
-
-    try:
-        if driver is None:
-            driver = get_webdriver()
-        USER_AGENT = driver.execute_script("return navigator.userAgent")
-        # Fix for Chrome 117 | https://github.com/FlareSolverr/FlareSolverr/issues/910
-        USER_AGENT = re.sub('HEADLESS', '', USER_AGENT, flags=re.IGNORECASE)
-        return USER_AGENT
-    except Exception as e:
-        raise Exception("Error getting browser User-Agent. " + str(e))
-    finally:
-        if driver is not None:
-            if PLATFORM_VERSION == "nt":
-                driver.close()
-            driver.quit()
-
-
 def start_xvfb_display():
+    """
+    On Linux we run a virtual X server (Xvfb) so the browser has a display.
+    Mirrors the legacy selenium/undetected-chromedriver setup that was used
+    to make the browser appear non-headless to anti-bot services.
+    """
     global XVFB_DISPLAY
     if XVFB_DISPLAY is None:
         from xvfbwrapper import Xvfb
@@ -343,7 +63,354 @@ def start_xvfb_display():
         XVFB_DISPLAY.start()
 
 
+def _build_proxy_args(proxy: dict) -> list:
+    """
+    Translate the legacy FlareSolverr proxy dict into the Chrome
+    ``--proxy-server`` argument. Authenticated proxies cannot be expressed as
+    a single command-line flag; callers must wire up the CDP auth handler
+    via :func:`install_proxy_auth_handler`.
+    """
+    if not proxy or 'url' not in proxy:
+        return []
+    parsed = urllib.parse.urlparse(proxy['url'])
+    if parsed.username or parsed.password:
+        # Strip credentials from the proxy URL passed to Chrome.
+        netloc = parsed.hostname or ''
+        if parsed.port:
+            netloc = f"{netloc}:{parsed.port}"
+        clean = parsed._replace(netloc=netloc, username=None, password=None)
+        return [f'--proxy-server={clean.geturl()}']
+    return [f'--proxy-server={proxy["url"]}']
+
+
+async def install_proxy_auth_handler(tab, proxy: dict):
+    """
+    Install a ``Fetch.authRequired`` handler that replies with the proxy
+    credentials in the legacy FlareSolverr ``proxy`` dict.
+    """
+    if not proxy or 'url' not in proxy:
+        return
+    parsed = urllib.parse.urlparse(proxy['url'])
+    username = parsed.username
+    password = parsed.password
+    if not (username and password):
+        return
+
+    async def _handler(event: fetch.AuthRequired):
+        await tab.send(
+            fetch.continue_with_auth(
+                request_id=event.request_id,
+                auth_challenge_response=fetch.AuthChallengeResponse(
+                    response='ProvideCredentials',
+                    username=username,
+                    password=password,
+                ),
+            )
+        )
+
+    await tab.send(fetch.enable(handle_auth_requests=True))
+    tab.add_handler(fetch.AuthRequired, _handler)
+
+
+class BrowserNavigationError(Exception):
+    """Raised when a top-level navigation fails at the network layer.
+
+    Surfaces Chromium's ``net::ERR_*`` codes (e.g. ``ERR_NAME_NOT_RESOLVED``,
+    ``ERR_PROXY_CONNECTION_FAILED``) so callers can map them to HTTP 5xx
+    responses, mirroring the legacy selenium ``WebDriverException`` behavior.
+    """
+
+    def __init__(self, error_text: str, url: str, proxy_url: str | None = None):
+        self.error_text = error_text
+        self.url = url
+        self.proxy_url = proxy_url
+        if proxy_url:
+            message = f"{error_text} for {url} (proxy={proxy_url})"
+        else:
+            message = f"{error_text} for {url}"
+        super().__init__(message)
+
+
+async def navigate_or_raise(tab, url: str, proxy_url: str | None = None) -> None:
+    """Navigate ``tab`` to ``url`` and raise :class:`BrowserNavigationError`
+    if the top-level request fails (bad domain, proxy error, TLS, etc.).
+
+    zendriver's ``tab.get`` does not surface network-level failures: Chrome
+    simply renders its built-in error page and the call returns successfully.
+    We subscribe to ``Network.requestWillBeSent`` / ``Network.loadingFailed``
+    for the duration of the navigation to detect the failure and report it
+    to the caller.
+
+    ``proxy_url`` is appended to the raised error message so callers can
+    distinguish proxy-induced failures from other network errors.
+    """
+    main_frame_id = getattr(tab, 'frame_id', None) or getattr(tab, '_frame_id', None)
+    state = {'request_id': None, 'error_text': None, 'doc_request_seen': False}
+
+    def _on_request(event, _connection=None):
+        # We only care about the top-level document request for our target frame.
+        event_type = getattr(event, 'type_', None)
+        if event_type is None or event_type != network.ResourceType.DOCUMENT:
+            return
+        if main_frame_id is not None and event.frame_id != main_frame_id:
+            return
+        if state['request_id'] is None:
+            state['request_id'] = event.request_id
+            state['doc_request_seen'] = True
+
+    def _on_failed(event, _connection=None):
+        if state['request_id'] is not None and event.request_id != state['request_id']:
+            return
+        event_type = getattr(event, 'type_', None)
+        if event_type is not None and event_type != network.ResourceType.DOCUMENT:
+            return
+        if state['error_text'] is None:
+            error_text = getattr(event, 'error_text', None) or 'unknown navigation error'
+            state['error_text'] = error_text
+
+    tab.add_handler(network.RequestWillBeSent, _on_request)
+    tab.add_handler(network.LoadingFailed, _on_failed)
+    try:
+        await tab.get(url)
+    finally:
+        tab.remove_handlers(network.RequestWillBeSent, _on_request)
+        tab.remove_handlers(network.LoadingFailed, _on_failed)
+
+    if state['error_text']:
+        raise BrowserNavigationError(state['error_text'], url, proxy_url=proxy_url)
+
+    # Defense in depth: Chrome renders a ``<neterror>`` element on the built-in
+    # error page. If we see it, the navigation failed even if no
+    # ``loadingFailed`` event matched (older Chromium, redirects, etc.).
+    try:
+        has_neterror = await tab.evaluate(
+            "!!document.querySelector('neterror')"
+        )
+    except Exception:
+        has_neterror = False
+    if has_neterror:
+        raise BrowserNavigationError(
+            f"net::ERR_UNKNOWN for {url} (browser error page detected)",
+            url,
+            proxy_url=proxy_url,
+        )
+
+
+async def get_browser(proxy: dict = None) -> zd.Browser:
+    """
+    Launch a fresh zendriver browser. ``proxy`` follows the legacy
+    FlareSolverr shape: ``{"url": "...", "username": "...", "password": "..."}``.
+    """
+    logging.debug('Launching web browser...')
+
+    # Hide headless markers from anti-bot services when possible.
+    use_xvfb = False
+    if get_config_headless():
+        if os.name == 'nt':
+            # On Windows there is no Xvfb; rely on zendriver's headless mode.
+            pass
+        else:
+            use_xvfb = True
+
+    if use_xvfb:
+        start_xvfb_display()
+
+    # Note: we intentionally do not set ``lang`` here. zendriver's Browser
+    # startup code unconditionally calls ``Config.add_argument("--lang=...")``
+    # when ``config.lang`` is not None, and that method refuses any argument
+    # containing the substring "lang" as a forbidden flag. Passing lang to the
+    # constructor still ends up stored on the attribute and re-injected later,
+    # so we leave it at the default (en-US,en;q=0.9).
+    config = zd.Config(
+        headless=False,
+        sandbox=False,
+        # Disable webgl/webrtc to avoid leaking extra fingerprint data.
+        disable_webrtc=True,
+        disable_webgl=True,
+    )
+
+    # Forward the same stealth-oriented Chrome flags used by the legacy build.
+    # Note: zendriver's Config refuses ``--no-sandbox`` via add_argument (it is
+    # auto-injected when ``sandbox=False``), so we must not pass it here.
+    for arg in (
+        '--window-size=1920,1080',
+        '--disable-search-engine-choice-screen',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--no-zygote',
+        '--ignore-certificate-errors',
+        '--ignore-ssl-errors',
+        '--disable-features=LocalNetworkAccessChecks',
+    ):
+        config.add_argument(arg)
+
+    if platform.machine().startswith(('arm', 'aarch')):
+        config.add_argument('--disable-gpu-sandbox')
+
+    if USER_AGENT:
+        config.user_agent = USER_AGENT
+
+    for proxy_arg in _build_proxy_args(proxy):
+        config.add_argument(proxy_arg)
+
+    browser = await zd.start(config=config)
+
+    if proxy and 'username' in proxy and 'password' in proxy:
+        # Auth is handled on every navigation target. Use main_tab as a starting
+        # point; the handler is registered on the connection so it will fire on
+        # any tab the browser creates.
+        try:
+            tab = browser.main_tab
+            if tab is not None:
+                await install_proxy_auth_handler(tab, proxy)
+        except Exception as e:
+            logging.debug("Could not install proxy auth handler: %s", e)
+
+    return browser
+
+
+async def get_user_agent(browser: zd.Browser = None) -> str:
+    """
+    Read the User-Agent the browser is currently advertising.
+    A short-lived browser is started if one wasn't supplied.
+    """
+    global USER_AGENT
+    if USER_AGENT is not None:
+        return USER_AGENT
+
+    owns_browser = browser is None
+    try:
+        if browser is None:
+            browser = await get_browser()
+        tab = browser.main_tab
+        if tab is None:
+            tab = await browser.get('about:blank')
+        USER_AGENT = await tab.evaluate('navigator.userAgent')
+        if not isinstance(USER_AGENT, str):
+            USER_AGENT = str(USER_AGENT)
+        # Strip any residual ``HEADLESS`` markers from the UA string.
+        USER_AGENT = re.sub('HEADLESS', '', USER_AGENT, flags=re.IGNORECASE)
+        return USER_AGENT
+    except Exception as e:
+        raise Exception("Error getting browser User-Agent. " + str(e))
+    finally:
+        if owns_browser and browser is not None:
+            try:
+                await browser.stop()
+            except Exception:
+                pass
+
+
+async def apply_request_cookies(tab, cookies) -> None:
+    """
+    Set cookies in the browser via the CDP Storage domain. ``cookies`` is the
+    legacy list-of-dicts shape (name/value/optional domain/...).
+    """
+    if not cookies:
+        return
+    for cookie in cookies:
+        params = {
+            'name': cookie.get('name'),
+            'value': cookie.get('value'),
+        }
+        if cookie.get('domain'):
+            params['domain'] = cookie['domain']
+        if cookie.get('path'):
+            params['path'] = cookie['path']
+        if cookie.get('url'):
+            params['url'] = cookie['url']
+        if 'secure' in cookie:
+            params['secure'] = bool(cookie['secure'])
+        if 'httpOnly' in cookie:
+            params['http_only'] = bool(cookie['httpOnly'])
+        if 'sameSite' in cookie and cookie['sameSite']:
+            try:
+                params['same_site'] = network.CookieSameSite(cookie['sameSite'])
+            except ValueError:
+                pass
+        if 'expires' in cookie and cookie['expires'] is not None:
+            try:
+                params['expires'] = float(cookie['expires'])
+            except (TypeError, ValueError):
+                pass
+        await tab.send(network.set_cookie(**params))
+
+
+def cookies_to_dict_list(cookies) -> list:
+    """
+    Convert the cookies returned by ``browser.cookies.get_all()`` to the
+    legacy list-of-dicts shape FlareSolverr has always returned to clients.
+    """
+    result = []
+    for c in cookies or []:
+        entry = {
+            'name': c.name,
+            'value': c.value,
+            'domain': c.domain,
+            'path': c.path,
+            'size': c.size,
+            'httpOnly': c.http_only,
+            'secure': c.secure,
+            'session': c.session,
+        }
+        if c.expires is not None:
+            entry['expires'] = c.expires
+        if c.same_site is not None:
+            try:
+                entry['sameSite'] = c.same_site.value if hasattr(c.same_site, 'value') else str(c.same_site)
+            except Exception:
+                pass
+        result.append(entry)
+    return result
+
+
 def object_to_dict(_object):
     json_dict = json.loads(json.dumps(_object, default=lambda o: o.__dict__))
     # remove hidden fields
     return {k: v for k, v in json_dict.items() if not k.startswith('__')}
+
+
+def render_post_form_html(url: str, post_data: str) -> str:
+    """
+    Build the auto-submitting POST form used by ``request.post``. Mirrors the
+    legacy selenium implementation.
+    """
+    post_form = f'<form id="hackForm" action="{url}" method="POST">'
+    query_string = post_data if post_data and post_data[0] != '?' else post_data[1:] if post_data else ''
+    pairs = query_string.split('&')
+    for pair in pairs:
+        parts = pair.split('=', 1)
+        # noinspection PyBroadException
+        try:
+            name = unquote(parts[0])
+        except Exception:
+            name = parts[0]
+        if name == 'submit':
+            continue
+        # noinspection PyBroadException
+        try:
+            value = unquote(parts[1]) if len(parts) > 1 else ''
+        except Exception:
+            value = parts[1] if len(parts) > 1 else ''
+        # Protection of " character, for syntax
+        value = value.replace('"', '&quot;')
+        post_form += f'<input type="text" name="{escape(quote(name))}" value="{escape(quote(value))}"><br>'
+    post_form += '</form>'
+    return f"""
+        <!DOCTYPE html>
+        <html>
+        <body>
+            {post_form}
+            <script>document.getElementById('hackForm').submit();</script>
+        </body>
+        </html>"""
+
+
+def get_user_agent_sync() -> str:
+    """
+    Synchronous wrapper around :func:`get_user_agent`. Used by endpoints
+    that are themselves sync (such as the index endpoint).
+    """
+    if USER_AGENT is not None:
+        return USER_AGENT
+    return asyncio.run(get_user_agent(None))

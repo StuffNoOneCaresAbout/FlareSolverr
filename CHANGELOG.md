@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.6.0 (unreleased)
+* Migrate package management to `uv` and ship a `pyproject.toml` (the legacy `requirements.txt` / `test-requirements.txt` are removed).
+* Replace Selenium + undetected-chromedriver with [`zendriver`](https://github.com/cdpdriver/zendriver), an async browser-automation library that talks to Chrome via the DevTools Protocol and ships a built-in Cloudflare solver (`zendriver.core.cloudflare.verify_cf`).
+* Convert the challenge-resolution code (`flaresolverr_service.py`, `sessions.py`, `utils.py`) to `async`/`await`. The bottle HTTP layer stays synchronous and bridges into the event loop with `asyncio.run()` per request.
+* Update the Dockerfile to a two-stage build: a `uv` builder stage resolves dependencies into a relocatable venv, and the runtime stage runs Chromium under Xvfb.
+* License changed from MIT to AGPL-3.0-or-later to match the license of the zendriver dependency.
+* Drop the in-tree `undetected_chromedriver/` vendored package and the Windows-only `pefile` helper.
+* Loosen tests that asserted Selenium-specific error messages (`net::ERR_*`) to be tolerant of the new zendriver wording.
+
 ## v3.5.0 (2026/05/26)
 * Add formatting to log file
 * Resolve turnstile captcha. Thanks @denis-svg

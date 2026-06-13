@@ -1,14 +1,15 @@
+import asyncio
 import json
 import logging
 import os
 import sys
 
 import certifi
-from bottle import run, response, Bottle, request, ServerAdapter
+from bottle import Bottle, ServerAdapter, request, response, run
 
+from bottle_plugins import prometheus_plugin
 from bottle_plugins.error_plugin import error_plugin
 from bottle_plugins.logger_plugin import logger_plugin
-from bottle_plugins import prometheus_plugin
 from dtos import V1RequestBase
 import flaresolverr_service
 import utils
@@ -53,22 +54,33 @@ def health():
 def controller_v1():
     """
     Controller v1
+
+    The request body is processed asynchronously via ``asyncio.run`` so the
+    zendriver-based service layer can stay fully async.
     """
     data = request.json or {}
-    if (('proxy' not in data or not data.get('proxy')) and env_proxy_url is not None and (env_proxy_username is None and env_proxy_password is None)):
+    if (('proxy' not in data or not data.get('proxy')) and env_proxy_url is not None
+            and (env_proxy_username is None and env_proxy_password is None)):
         logging.info('Using proxy URL ENV')
         data['proxy'] = {"url": env_proxy_url}
-    if (('proxy' not in data or not data.get('proxy')) and env_proxy_url is not None and (env_proxy_username is not None or env_proxy_password is not None)):
+    if (('proxy' not in data or not data.get('proxy')) and env_proxy_url is not None
+            and (env_proxy_username is not None or env_proxy_password is not None)):
         logging.info('Using proxy URL, username & password ENVs')
-        data['proxy'] = {"url": env_proxy_url, "username": env_proxy_username, "password": env_proxy_password}
+        data['proxy'] = {"url": env_proxy_url,
+                         "username": env_proxy_username,
+                         "password": env_proxy_password}
     req = V1RequestBase(data)
-    res = flaresolverr_service.controller_v1_endpoint(req)
+    res = asyncio.run(flaresolverr_service.controller_v1_endpoint(req))
     if res.__error_500__:
         response.status = 500
     return utils.object_to_dict(res)
 
 
-if __name__ == "__main__":
+def main():
+    """
+    Entry point used by the ``flaresolverr`` console script and by
+    ``python -m flaresolverr`` invocations.
+    """
     # check python version
     if sys.version_info < (3, 9):
         raise Exception("The Python version is less than 3.9, a version equal to or higher is required.")
@@ -88,7 +100,6 @@ if __name__ == "__main__":
     # validate configuration
     log_level = os.environ.get('LOG_LEVEL', 'info').upper()
     log_file = os.environ.get('LOG_FILE', None)
-    log_html = utils.get_config_log_html()
     headless = utils.get_config_headless()
     server_host = os.environ.get('HOST', '0.0.0.0')
     server_port = int(os.environ.get('PORT', 8191))
@@ -120,10 +131,11 @@ if __name__ == "__main__":
             ]
         )
 
-    # disable warning traces from urllib3
+    # disable warning traces from urllib3 / zendriver / websockets
     logging.getLogger('urllib3').setLevel(logging.ERROR)
-    logging.getLogger('selenium.webdriver.remote.remote_connection').setLevel(logging.WARNING)
-    logging.getLogger('undetected_chromedriver').setLevel(logging.WARNING)
+    logging.getLogger('websockets').setLevel(logging.WARNING)
+    logging.getLogger('zendriver').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
 
     logging.info(f'FlareSolverr {utils.get_flaresolverr_version()}')
     logging.debug('Debug log enabled')
@@ -132,9 +144,9 @@ if __name__ == "__main__":
     utils.get_current_platform()
 
     # test browser installation
-    flaresolverr_service.test_browser_installation()
+    asyncio.run(flaresolverr_service.test_browser_installation())
 
-    # start bootle plugins
+    # start bottle plugins
     # plugin order is important
     app.install(logger_plugin)
     app.install(error_plugin)
@@ -149,4 +161,16 @@ if __name__ == "__main__":
         def run(self, handler):
             from waitress import serve
             serve(handler, host=self.host, port=self.port, asyncore_use_poll=True)
-    run(app, host=server_host, port=server_port, quiet=True, server=WaitressServerPoll)
+
+    try:
+        run(app, host=server_host, port=server_port, quiet=True, server=WaitressServerPoll)
+    finally:
+        # Make sure all active sessions / browsers are closed on shutdown.
+        try:
+            asyncio.run(flaresolverr_service.SESSIONS_STORAGE.stop_all())
+        except Exception as e:
+            logging.debug('Error stopping sessions on shutdown: %s', e)
+
+
+if __name__ == "__main__":
+    main()

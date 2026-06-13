@@ -1,20 +1,16 @@
+import asyncio
 import logging
 import platform
 import sys
 import time
 from datetime import timedelta
-from html import escape
-from urllib.parse import unquote, quote
 
-from func_timeout import FunctionTimedOut, func_timeout
-from selenium.common import TimeoutException
-from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.expected_conditions import (
-    presence_of_element_located, staleness_of, title_is)
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.support.wait import WebDriverWait
+import zendriver as zd
+from zendriver.cdp import network
+from zendriver.core.cloudflare import (
+    cf_is_interactive_challenge_present,
+    verify_cf,
+)
 
 import utils
 from dtos import (STATUS_ERROR, STATUS_OK, ChallengeResolutionResultT,
@@ -26,57 +22,62 @@ ACCESS_DENIED_TITLES = [
     # Cloudflare
     'Access denied',
     # Cloudflare http://bitturk.net/ Firefox
-    'Attention Required! | Cloudflare'
+    'Attention Required! | Cloudflare',
 ]
 ACCESS_DENIED_SELECTORS = [
     # Cloudflare
     'div.cf-error-title span.cf-code-label span',
     # Cloudflare http://bitturk.net/ Firefox
-    '#cf-error-details div.cf-error-overview h1'
+    '#cf-error-details div.cf-error-overview h1',
 ]
 CHALLENGE_TITLES = [
     # Cloudflare
     'Just a moment...',
     # DDoS-GUARD
-    'DDoS-Guard'
+    'DDoS-Guard',
 ]
 CHALLENGE_SELECTORS = [
     # Cloudflare
-    '#cf-challenge-running', '.ray_id', '.attack-box', '#cf-please-wait', '#challenge-spinner', '#trk_jschal_js', '#turnstile-wrapper', '.lds-ring',
+    '#cf-challenge-running', '.ray_id', '.attack-box', '#cf-please-wait',
+    '#challenge-spinner', '#trk_jschal_js', '#turnstile-wrapper', '.lds-ring',
     # Custom CloudFlare for EbookParadijs, Film-Paleis, MuziekFabriek and Puur-Hollands
     'td.info #js_info',
     # Fairlane / pararius.com
-    'div.vc div.text-box h2'
+    'div.vc div.text-box h2',
 ]
 
 TURNSTILE_SELECTORS = [
-    "input[name='cf-turnstile-response']"
+    "input[name='cf-turnstile-response']",
 ]
 
-SHORT_TIMEOUT = 1
+SHORT_TIMEOUT = 2
 SESSIONS_STORAGE = SessionsStorage()
 
 
-def test_browser_installation():
+async def test_browser_installation():
     logging.info("Testing web browser installation...")
     logging.info("Platform: " + platform.platform())
 
-    chrome_exe_path = utils.get_chrome_exe_path()
-    if chrome_exe_path is None:
-        logging.error("Chrome / Chromium web browser not installed!")
-        sys.exit(1)
-    else:
-        logging.info("Chrome / Chromium path: " + chrome_exe_path)
-
-    chrome_major_version = utils.get_chrome_major_version()
-    if chrome_major_version == '':
-        logging.error("Chrome / Chromium version not detected!")
-        sys.exit(1)
-    else:
-        logging.info("Chrome / Chromium major version: " + chrome_major_version)
-
     logging.info("Launching web browser...")
-    user_agent = utils.get_user_agent()
+    browser = None
+    try:
+        browser = await utils.get_browser()
+    except Exception as e:
+        logging.error("Error starting browser: %s", e)
+        sys.exit(1)
+
+    try:
+        user_agent = await utils.get_user_agent(browser)
+    except Exception as e:
+        logging.error("Error retrieving User-Agent: %s", e)
+        sys.exit(1)
+    finally:
+        if browser is not None:
+            try:
+                await browser.stop()
+            except Exception:
+                pass
+
     logging.info("FlareSolverr User-Agent: " + user_agent)
     logging.info("Test successful!")
 
@@ -85,7 +86,7 @@ def index_endpoint() -> IndexResponse:
     res = IndexResponse({})
     res.msg = "FlareSolverr is ready!"
     res.version = utils.get_flaresolverr_version()
-    res.userAgent = utils.get_user_agent()
+    res.userAgent = utils.get_user_agent_sync()
     return res
 
 
@@ -95,12 +96,12 @@ def health_endpoint() -> HealthResponse:
     return res
 
 
-def controller_v1_endpoint(req: V1RequestBase) -> V1ResponseBase:
+async def controller_v1_endpoint(req: V1RequestBase) -> V1ResponseBase:
     start_ts = int(time.time() * 1000)
     logging.info(f"Incoming request => POST /v1 body: {utils.object_to_dict(req)}")
     res: V1ResponseBase
     try:
-        res = _controller_v1_handler(req)
+        res = await _controller_v1_handler(req)
     except Exception as e:
         res = V1ResponseBase({})
         res.__error_500__ = True
@@ -116,7 +117,7 @@ def controller_v1_endpoint(req: V1RequestBase) -> V1ResponseBase:
     return res
 
 
-def _controller_v1_handler(req: V1RequestBase) -> V1ResponseBase:
+async def _controller_v1_handler(req: V1RequestBase) -> V1ResponseBase:
     # do some validations
     if req.cmd is None:
         raise Exception("Request parameter 'cmd' is mandatory.")
@@ -132,22 +133,22 @@ def _controller_v1_handler(req: V1RequestBase) -> V1ResponseBase:
     # execute the command
     res: V1ResponseBase
     if req.cmd == 'sessions.create':
-        res = _cmd_sessions_create(req)
+        res = await _cmd_sessions_create(req)
     elif req.cmd == 'sessions.list':
         res = _cmd_sessions_list(req)
     elif req.cmd == 'sessions.destroy':
-        res = _cmd_sessions_destroy(req)
+        res = await _cmd_sessions_destroy(req)
     elif req.cmd == 'request.get':
-        res = _cmd_request_get(req)
+        res = await _cmd_request_get(req)
     elif req.cmd == 'request.post':
-        res = _cmd_request_post(req)
+        res = await _cmd_request_post(req)
     else:
         raise Exception(f"Request parameter 'cmd' = '{req.cmd}' is invalid.")
 
     return res
 
 
-def _cmd_request_get(req: V1RequestBase) -> V1ResponseBase:
+async def _cmd_request_get(req: V1RequestBase) -> V1ResponseBase:
     # do some validations
     if req.url is None:
         raise Exception("Request parameter 'url' is mandatory in 'request.get' command.")
@@ -158,7 +159,7 @@ def _cmd_request_get(req: V1RequestBase) -> V1ResponseBase:
     if req.download is not None:
         logging.warning("Request parameter 'download' was removed in FlareSolverr v2.")
 
-    challenge_res = _resolve_challenge(req, 'GET')
+    challenge_res = await _resolve_challenge(req, 'GET')
     res = V1ResponseBase({})
     res.status = challenge_res.status
     res.message = challenge_res.message
@@ -166,7 +167,7 @@ def _cmd_request_get(req: V1RequestBase) -> V1ResponseBase:
     return res
 
 
-def _cmd_request_post(req: V1RequestBase) -> V1ResponseBase:
+async def _cmd_request_post(req: V1RequestBase) -> V1ResponseBase:
     # do some validations
     if req.postData is None:
         raise Exception("Request parameter 'postData' is mandatory in 'request.post' command.")
@@ -175,7 +176,7 @@ def _cmd_request_post(req: V1RequestBase) -> V1ResponseBase:
     if req.download is not None:
         logging.warning("Request parameter 'download' was removed in FlareSolverr v2.")
 
-    challenge_res = _resolve_challenge(req, 'POST')
+    challenge_res = await _resolve_challenge(req, 'POST')
     res = V1ResponseBase({})
     res.status = challenge_res.status
     res.message = challenge_res.message
@@ -183,10 +184,10 @@ def _cmd_request_post(req: V1RequestBase) -> V1ResponseBase:
     return res
 
 
-def _cmd_sessions_create(req: V1RequestBase) -> V1ResponseBase:
+async def _cmd_sessions_create(req: V1RequestBase) -> V1ResponseBase:
     logging.debug("Creating new session...")
 
-    session, fresh = SESSIONS_STORAGE.create(session_id=req.session, proxy=req.proxy)
+    session, fresh = await SESSIONS_STORAGE.create(session_id=req.session, proxy=req.proxy)
     session_id = session.session_id
 
     if not fresh:
@@ -205,7 +206,6 @@ def _cmd_sessions_create(req: V1RequestBase) -> V1ResponseBase:
 
 def _cmd_sessions_list(req: V1RequestBase) -> V1ResponseBase:
     session_ids = SESSIONS_STORAGE.session_ids()
-
     return V1ResponseBase({
         "status": STATUS_OK,
         "message": "",
@@ -213,9 +213,9 @@ def _cmd_sessions_list(req: V1RequestBase) -> V1ResponseBase:
     })
 
 
-def _cmd_sessions_destroy(req: V1RequestBase) -> V1ResponseBase:
+async def _cmd_sessions_destroy(req: V1RequestBase) -> V1ResponseBase:
     session_id = req.session
-    existed = SESSIONS_STORAGE.destroy(session_id)
+    existed = await SESSIONS_STORAGE.destroy(session_id)
 
     if not existed:
         raise Exception("The session doesn't exist.")
@@ -226,14 +226,15 @@ def _cmd_sessions_destroy(req: V1RequestBase) -> V1ResponseBase:
     })
 
 
-def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
+async def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
     timeout = int(req.maxTimeout) / 1000
-    driver = None
+    browser: zd.Browser = None
+    owns_browser = False
     try:
         if req.session:
             session_id = req.session
             ttl = timedelta(minutes=req.session_ttl_minutes) if req.session_ttl_minutes else None
-            session, fresh = SESSIONS_STORAGE.get(session_id, ttl)
+            session, fresh = await SESSIONS_STORAGE.get(session_id, ttl)
 
             if fresh:
                 logging.debug(f"new session created to perform the request (session_id={session_id})")
@@ -241,221 +242,311 @@ def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
                 logging.debug(f"existing session is used to perform the request (session_id={session_id}, "
                               f"lifetime={str(session.lifetime())}, ttl={str(ttl)})")
 
-            driver = session.driver
+            browser = session.browser
         else:
-            driver = utils.get_webdriver(req.proxy)
-            logging.debug('New instance of webdriver has been created to perform the request')
-        return func_timeout(timeout, _evil_logic, (req, driver, method))
-    except FunctionTimedOut:
+            browser = await utils.get_browser(req.proxy)
+            owns_browser = True
+            logging.debug('New instance of browser has been created to perform the request')
+
+        return await asyncio.wait_for(_evil_logic(req, browser, method), timeout=timeout)
+    except asyncio.TimeoutError:
         raise Exception(f'Error solving the challenge. Timeout after {timeout} seconds.')
     except Exception as e:
         raise Exception('Error solving the challenge. ' + str(e).replace('\n', '\\n'))
     finally:
-        if not req.session and driver is not None:
-            if utils.PLATFORM_VERSION == "nt":
-                driver.close()
-            driver.quit()
-            logging.debug('A used instance of webdriver has been destroyed')
+        if owns_browser and browser is not None:
+            try:
+                await browser.stop()
+            except Exception as e:
+                logging.debug('Error closing browser: %s', e)
+            logging.debug('A used instance of browser has been destroyed')
 
 
-def click_verify(driver: WebDriver, num_tabs: int = 1):
+async def _block_media(tab: zd.Tab) -> None:
+    """
+    Block images / CSS / fonts at the network layer to speed up navigation.
+    Mirrors the legacy ``Network.setBlockedURLs`` flow but uses zendriver's
+    CDP bindings.
+    """
+    block_urls = [
+        # Images
+        "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.bmp", "*.svg", "*.ico",
+        "*.PNG", "*.JPG", "*.JPEG", "*.GIF", "*.WEBP", "*.BMP", "*.SVG", "*.ICO",
+        "*.tiff", "*.tif", "*.jpe", "*.apng", "*.avif", "*.heic", "*.heif",
+        "*.TIFF", "*.TIF", "*.JPE", "*.APNG", "*.AVIF", "*.HEIC", "*.HEIF",
+        # Stylesheets
+        "*.css",
+        "*.CSS",
+        # Fonts
+        "*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
+        "*.WOFF", "*.WOFF2", "*.TTF", "*.OTF", "*.EOT",
+    ]
+    try:
+        await tab.send(network.enable())
+        await tab.send(network.set_blocked_urls(urls=block_urls))
+        logging.debug("Network.setBlockedURLs applied")
+    except Exception as e:
+        logging.debug("Network.setBlockedURLs failed or unsupported: %s", e)
+
+
+async def _is_access_denied(tab: zd.Tab) -> bool:
+    page_title = tab.title or ''
+    for title in ACCESS_DENIED_TITLES:
+        if page_title.startswith(title):
+            return True
+    for selector in ACCESS_DENIED_SELECTORS:
+        try:
+            elements = await tab.select_all(selector, timeout=0.5)
+            if elements:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _has_challenge(tab: zd.Tab) -> bool:
+    page_title = tab.title or ''
+    for title in CHALLENGE_TITLES:
+        if title.lower() == page_title.lower():
+            return True
+    for selector in CHALLENGE_SELECTORS:
+        try:
+            elements = await tab.select_all(selector, timeout=0.5)
+            if elements:
+                return True
+        except Exception:
+            continue
+    if await cf_is_interactive_challenge_present(tab, timeout=0.5):
+        return True
+    return False
+
+
+async def _wait_challenge_gone(tab: zd.Tab, max_attempts: int = 30) -> None:
+    """
+    Wait until the challenge title / selectors are no longer present.
+    Polling is required because zendriver does not ship a "wait for element
+    to disappear" helper.
+    """
+    for attempt in range(1, max_attempts + 1):
+        await asyncio.sleep(SHORT_TIMEOUT)
+        page_title = (tab.title or '').lower()
+        if page_title and not any(t.lower() == page_title for t in CHALLENGE_TITLES):
+            title_gone = True
+        else:
+            title_gone = False
+        selector_gone = True
+        for selector in CHALLENGE_SELECTORS:
+            try:
+                elements = await tab.select_all(selector, timeout=0.2)
+                if elements:
+                    selector_gone = False
+                    break
+            except Exception:
+                continue
+        if title_gone and selector_gone:
+            return
+        logging.debug("Challenge still present (attempt %d)", attempt)
+    logging.debug("Reached max attempts waiting for challenge to disappear")
+
+
+async def _resolve_turnstile_captcha(req: V1RequestBase, tab: zd.Tab):
+    """
+    Resolve the Turnstile captcha, if any, by tabbing into the iframe and
+    pressing space. Mirrors the legacy ``click_verify`` flow.
+    """
+    if req.tabs_till_verify is None:
+        return None
+
+    logging.debug(f"Navigating to... {req.url} in order to pass the turnstile challenge")
+    proxy_url = (req.proxy or {}).get('url') if req.proxy else None
+    await utils.navigate_or_raise(tab, req.url, proxy_url=proxy_url)
+
+    turnstile_challenge_found = False
+    for selector in TURNSTILE_SELECTORS:
+        try:
+            elements = await tab.select_all(selector, timeout=0.5)
+            if elements:
+                turnstile_challenge_found = True
+                logging.info("Turnstile challenge detected. Selector found: " + selector)
+                break
+        except Exception:
+            continue
+    if not turnstile_challenge_found:
+        logging.debug('Turnstile challenge not found')
+        return None
+
+    return await _click_turnstile_until_token(tab, num_tabs=req.tabs_till_verify)
+
+
+async def _click_turnstile_until_token(tab: zd.Tab, num_tabs: int) -> str:
+    try:
+        token_input = await tab.select("input[name='cf-turnstile-response']", timeout=5)
+    except Exception:
+        logging.debug("Could not find the cf-turnstile-response input")
+        return None
+    current_value = await token_input.get_attribute('value') or ''
+    start = time.monotonic()
+    timeout_s = 60.0
+    while time.monotonic() - start < timeout_s:
+        try:
+            await _click_verify(tab, num_tabs=num_tabs)
+        except Exception:
+            logging.debug("click_verify failed", exc_info=True)
+        try:
+            turnstile_token = (await token_input.get_attribute('value')) or ''
+        except Exception:
+            turnstile_token = ''
+        if turnstile_token and turnstile_token != current_value:
+            logging.info(f"Turnstile token: {turnstile_token}")
+            return turnstile_token
+        logging.debug("Failed to extract token, possibly click failed")
+        # reset focus and try again
+        try:
+            await tab.evaluate("""
+                let el = document.createElement('button');
+                el.style.position='fixed';
+                el.style.top='0';
+                el.style.left='0';
+                document.body.prepend(el);
+                el.focus();
+            """)
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    logging.debug("Timed out trying to obtain Turnstile token")
+    return None
+
+
+async def _click_verify(tab: zd.Tab, num_tabs: int = 1) -> None:
+    """
+    Replicates the legacy ``click_verify`` helper: tab into the challenge,
+    press space, and (optionally) click the ``Verify you are human`` button.
+    """
+    from zendriver.cdp import input_
+
     try:
         logging.debug("Try to find the Cloudflare verify checkbox...")
-        actions = ActionChains(driver)
-        actions.pause(5)
         for _ in range(num_tabs):
-            actions.send_keys(Keys.TAB).pause(0.1)
-        actions.pause(1)
-        actions.send_keys(Keys.SPACE).perform()
-        
+            await tab.send(input_.dispatch_key_event(
+                type_='rawKeyDown',
+                key='Tab',
+                code='Tab',
+                windows_virtual_key_code=9,
+                native_virtual_key_code=9,
+            ))
+            await tab.send(input_.dispatch_key_event(
+                type_='keyUp',
+                key='Tab',
+                code='Tab',
+                windows_virtual_key_code=9,
+                native_virtual_key_code=9,
+            ))
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(1)
+        await tab.send(input_.dispatch_key_event(
+            type_='char',
+            text=' ',
+            unmodified_text=' ',
+            key=' ',
+            code='Space',
+            windows_virtual_key_code=32,
+            native_virtual_key_code=32,
+        ))
         logging.debug(f"Cloudflare verify checkbox clicked after {num_tabs} tabs!")
     except Exception:
-        logging.debug("Cloudflare verify checkbox not found on the page.")
-    finally:
-        driver.switch_to.default_content()
+        logging.debug("Cloudflare verify checkbox not found on the page.", exc_info=True)
 
     try:
         logging.debug("Try to find the Cloudflare 'Verify you are human' button...")
-        button = driver.find_element(
-            by=By.XPATH,
-            value="//input[@type='button' and @value='Verify you are human']",
+        # zendriver's select() uses CSS selectors; the legacy code used an
+        # XPath expression which is equivalent to this attribute selector.
+        button = await tab.select(
+            "input[type='button'][value='Verify you are human']",
+            timeout=0.5,
         )
         if button:
-            actions = ActionChains(driver)
-            actions.move_to_element_with_offset(button, 5, 7)
-            actions.click(button)
-            actions.perform()
+            await button.click()
             logging.debug("The Cloudflare 'Verify you are human' button found and clicked!")
     except Exception:
         logging.debug("The Cloudflare 'Verify you are human' button not found on the page.")
 
-    time.sleep(2)
+    await asyncio.sleep(2)
 
-def _get_turnstile_token(driver: WebDriver, tabs: int):
-    token_input = driver.find_element(By.CSS_SELECTOR, "input[name='cf-turnstile-response']")
-    current_value = token_input.get_attribute("value")
-    while True:
-        click_verify(driver, num_tabs=tabs)
-        turnstile_token = token_input.get_attribute("value")
-        if turnstile_token:
-            if turnstile_token != current_value:
-                logging.info(f"Turnstile token: {turnstile_token}")
-                return turnstile_token
-        logging.debug(f"Failed to extract token possibly click failed")        
 
-        # reset focus
-        driver.execute_script("""
-            let el = document.createElement('button');
-            el.style.position='fixed';
-            el.style.top='0';
-            el.style.left='0';
-            document.body.prepend(el);
-            el.focus();
-        """)
-        time.sleep(1)
-
-def _resolve_turnstile_captcha(req: V1RequestBase, driver: WebDriver):
-    turnstile_token = None
-    if req.tabs_till_verify is not None:
-        logging.debug(f'Navigating to... {req.url} in order to pass the turnstile challenge')
-        driver.get(req.url)
-
-        turnstile_challenge_found = False
-        for selector in TURNSTILE_SELECTORS:
-            found_elements = driver.find_elements(By.CSS_SELECTOR, selector)   
-            if len(found_elements) > 0:
-                turnstile_challenge_found = True
-                logging.info("Turnstile challenge detected. Selector found: " + selector)
-                break
-        if turnstile_challenge_found:
-            turnstile_token = _get_turnstile_token(driver=driver, tabs=req.tabs_till_verify)
-        else:
-            logging.debug(f'Turnstile challenge not found')
-    return turnstile_token
-
-def _evil_logic(req: V1RequestBase, driver: WebDriver, method: str) -> ChallengeResolutionT:
+async def _evil_logic(req: V1RequestBase, browser: zd.Browser, method: str) -> ChallengeResolutionT:
     res = ChallengeResolutionT({})
     res.status = STATUS_OK
     res.message = ""
+
+    # Use the main tab of the supplied browser. If it was already used for a
+    # previous request, we still re-use it (matches legacy behavior for
+    # session-less requests where a brand-new browser is created anyway).
+    tab = browser.main_tab
+    if tab is None:
+        tab = await browser.get('about:blank')
 
     # optionally block resources like images/css/fonts using CDP
     disable_media = utils.get_config_disable_media()
     if req.disableMedia is not None:
         disable_media = req.disableMedia
     if disable_media:
-        block_urls = [
-            # Images
-            "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.bmp", "*.svg", "*.ico",
-            "*.PNG", "*.JPG", "*.JPEG", "*.GIF", "*.WEBP", "*.BMP", "*.SVG", "*.ICO",
-            "*.tiff", "*.tif", "*.jpe", "*.apng", "*.avif", "*.heic", "*.heif",
-            "*.TIFF", "*.TIF", "*.JPE", "*.APNG", "*.AVIF", "*.HEIC", "*.HEIF",
-            # Stylesheets
-            "*.css",
-            "*.CSS",
-            # Fonts
-            "*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
-            "*.WOFF", "*.WOFF2", "*.TTF", "*.OTF", "*.EOT"
-        ]
-        try:
-            logging.debug("Network.setBlockedURLs: %s", block_urls)
-            driver.execute_cdp_cmd("Network.enable", {})
-            driver.execute_cdp_cmd("Network.setBlockedURLs", {"urls": block_urls})
-        except Exception:
-            # if CDP commands are not available or fail, ignore and continue
-            logging.debug("Network.setBlockedURLs failed or unsupported on this webdriver")
+        await _block_media(tab)
 
     # navigate to the page
     logging.debug(f"Navigating to... {req.url}")
     turnstile_token = None
 
     if method == "POST":
-        _post_request(req, driver)
+        await _post_request(req, tab)
     else:
         if req.tabs_till_verify is None:
-            driver.get(req.url)
+            proxy_url = (req.proxy or {}).get('url') if req.proxy else None
+            await utils.navigate_or_raise(tab, req.url, proxy_url=proxy_url)
         else:
-            turnstile_token = _resolve_turnstile_captcha(req, driver)
+            turnstile_token = await _resolve_turnstile_captcha(req, tab)
 
     # set cookies if required
     if req.cookies is not None and len(req.cookies) > 0:
-        logging.debug(f'Setting cookies...')
-        for cookie in req.cookies:
-            driver.delete_cookie(cookie['name'])
-            driver.add_cookie(cookie)
+        logging.debug('Setting cookies...')
+        await utils.apply_request_cookies(tab, req.cookies)
         # reload the page
         if method == 'POST':
-            _post_request(req, driver)
+            await _post_request(req, tab)
         else:
-            driver.get(req.url)
+            proxy_url = (req.proxy or {}).get('url') if req.proxy else None
+    await utils.navigate_or_raise(tab, req.url, proxy_url=proxy_url)
 
     # wait for the page
     if utils.get_config_log_html():
-        logging.debug(f"Response HTML:\n{driver.page_source}")
-    html_element = driver.find_element(By.TAG_NAME, "html")
-    page_title = driver.title
-
-    # find access denied titles
-    for title in ACCESS_DENIED_TITLES:
-        if page_title.startswith(title):
-            raise Exception('Cloudflare has blocked this request. '
-                            'Probably your IP is banned for this site, check in your web browser.')
-    # find access denied selectors
-    for selector in ACCESS_DENIED_SELECTORS:
-        found_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-        if len(found_elements) > 0:
-            raise Exception('Cloudflare has blocked this request. '
-                            'Probably your IP is banned for this site, check in your web browser.')
-
-    # find challenge by title
-    challenge_found = False
-    for title in CHALLENGE_TITLES:
-        if title.lower() == page_title.lower():
-            challenge_found = True
-            logging.info("Challenge detected. Title found: " + page_title)
-            break
-    if not challenge_found:
-        # find challenge by selectors
-        for selector in CHALLENGE_SELECTORS:
-            found_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            if len(found_elements) > 0:
-                challenge_found = True
-                logging.info("Challenge detected. Selector found: " + selector)
-                break
-
-    attempt = 0
-    if challenge_found:
-        while True:
-            try:
-                attempt = attempt + 1
-                # wait until the title changes
-                for title in CHALLENGE_TITLES:
-                    logging.debug("Waiting for title (attempt " + str(attempt) + "): " + title)
-                    WebDriverWait(driver, SHORT_TIMEOUT).until_not(title_is(title))
-
-                # then wait until all the selectors disappear
-                for selector in CHALLENGE_SELECTORS:
-                    logging.debug("Waiting for selector (attempt " + str(attempt) + "): " + selector)
-                    WebDriverWait(driver, SHORT_TIMEOUT).until_not(
-                        presence_of_element_located((By.CSS_SELECTOR, selector)))
-
-                # all elements not found
-                break
-
-            except TimeoutException:
-                logging.debug("Timeout waiting for selector")
-
-                click_verify(driver)
-
-                # update the html (cloudflare reloads the page every 5 s)
-                html_element = driver.find_element(By.TAG_NAME, "html")
-
-        # waits until cloudflare redirection ends
-        logging.debug("Waiting for redirect")
-        # noinspection PyBroadException
         try:
-            WebDriverWait(driver, SHORT_TIMEOUT).until(staleness_of(html_element))
+            html = await tab.get_content()
+            logging.debug(f"Response HTML:\n{html}")
         except Exception:
-            logging.debug("Timeout waiting for redirect")
+            logging.debug("Could not read page source for LOG_HTML")
+
+    if await _is_access_denied(tab):
+        raise Exception('Cloudflare has blocked this request. '
+                        'Probably your IP is banned for this site, check in your web browser.')
+
+    challenge_found = await _has_challenge(tab)
+    if challenge_found:
+        logging.info("Challenge detected. Attempting to solve with zendriver.verify_cf")
+        try:
+            await verify_cf(tab, timeout=int(req.maxTimeout) / 1000, click_delay=5)
+        except TimeoutError:
+            logging.debug("verify_cf timed out, retrying with click_verify as a fallback")
+        except Exception as e:
+            logging.debug(f"verify_cf failed: {e}")
+
+        # Fall back to the legacy poll + click_verify loop, in case verify_cf
+        # missed a challenge variant (DDoS-Guard, custom CF, Fairlane…).
+        await _wait_challenge_gone(tab)
+        if await _has_challenge(tab):
+            try:
+                await _click_verify(tab)
+            except Exception:
+                logging.debug("click_verify fallback failed", exc_info=True)
+            await _wait_challenge_gone(tab)
 
         logging.info("Challenge solved!")
         res.message = "Challenge solved!"
@@ -463,57 +554,45 @@ def _evil_logic(req: V1RequestBase, driver: WebDriver, method: str) -> Challenge
         logging.info("Challenge not detected!")
         res.message = "Challenge not detected!"
 
+    # collect the challenge solution
     challenge_res = ChallengeResolutionResultT({})
-    challenge_res.url = driver.current_url
-    challenge_res.status = 200  # todo: fix, selenium not provides this info
-    challenge_res.cookies = driver.get_cookies()
-    challenge_res.userAgent = utils.get_user_agent(driver)
+    try:
+        challenge_res.url = tab.url
+    except Exception:
+        challenge_res.url = req.url
+    challenge_res.status = 200  # todo: real status from the network stack
+    try:
+        cookies = await browser.cookies.get_all()
+        challenge_res.cookies = utils.cookies_to_dict_list(cookies)
+    except Exception as e:
+        logging.debug("Could not read cookies: %s", e)
+        challenge_res.cookies = []
+    challenge_res.userAgent = await utils.get_user_agent(browser)
     challenge_res.turnstile_token = turnstile_token
 
     if not req.returnOnlyCookies:
-        challenge_res.headers = {}  # todo: fix, selenium not provides this info
-
+        challenge_res.headers = {}  # todo: extract headers from a fetch interceptor
         if req.waitInSeconds and req.waitInSeconds > 0:
-            logging.info("Waiting " + str(req.waitInSeconds) + " seconds before returning the response...")
-            time.sleep(req.waitInSeconds)
-
-        challenge_res.response = driver.page_source
+            logging.info("Waiting " + str(req.waitInSeconds) +
+                         " seconds before returning the response...")
+            await asyncio.sleep(req.waitInSeconds)
+        try:
+            challenge_res.response = await tab.get_content()
+        except Exception as e:
+            logging.debug("Could not read page source: %s", e)
+            challenge_res.response = ''
 
     if req.returnScreenshot:
-        challenge_res.screenshot = driver.get_screenshot_as_base64()
+        try:
+            challenge_res.screenshot = await tab.screenshot_b64(format='png')
+        except Exception as e:
+            logging.debug("Could not take screenshot: %s", e)
 
     res.result = challenge_res
     return res
 
 
-def _post_request(req: V1RequestBase, driver: WebDriver):
-    post_form = f'<form id="hackForm" action="{req.url}" method="POST">'
-    query_string = req.postData if req.postData and req.postData[0] != '?' else req.postData[1:] if req.postData else ''
-    pairs = query_string.split('&')
-    for pair in pairs:
-        parts = pair.split('=', 1)
-        # noinspection PyBroadException
-        try:
-            name = unquote(parts[0])
-        except Exception:
-            name = parts[0]
-        if name == 'submit':
-            continue
-        # noinspection PyBroadException
-        try:
-            value = unquote(parts[1]) if len(parts) > 1 else ''
-        except Exception:
-            value = parts[1] if len(parts) > 1 else ''
-        # Protection of " character, for syntax
-        value=value.replace('"','&quot;')
-        post_form += f'<input type="text" name="{escape(quote(name))}" value="{escape(quote(value))}"><br>'
-    post_form += '</form>'
-    html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <body>
-            {post_form}
-            <script>document.getElementById('hackForm').submit();</script>
-        </body>
-        </html>"""
-    driver.get("data:text/html;charset=utf-8,{html_content}".format(html_content=html_content))
+async def _post_request(req: V1RequestBase, tab: zd.Tab):
+    html_content = utils.render_post_form_html(req.url, req.postData)
+    data_url = "data:text/html;charset=utf-8," + html_content
+    await tab.get(data_url)
