@@ -75,8 +75,6 @@ ENV PATH="/app/.venv/bin:$PATH" \
 VOLUME /config
 USER flaresolverr
 
-RUN mkdir -p "/app/.config/chromium/Crash Reports/pending"
-
 EXPOSE 8191
 EXPOSE 8192
 

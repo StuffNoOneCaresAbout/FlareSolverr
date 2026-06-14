@@ -1,61 +1,61 @@
 [project]
-name = "flaresolverr"
-version = "3.5.0"
-description = "Proxy server to bypass Cloudflare and DDoS-GUARD protection"
-readme = "README.md"
-license = "AGPL-3.0-or-later"
-license-files = ["LICENSE"]
 authors = [
-    { name = "Diego Heras", email = "ngosang@hotmail.es" },
+  {name = "Diego Heras", email = "ngosang@hotmail.es"},
 ]
-requires-python = ">=3.11"
-keywords = ["cloudflare", "bypass", "proxy", "scraping", "automation"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
-    "Environment :: Console",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
-    "Operating System :: POSIX :: Linux",
-    "Operating System :: MacOS",
-    "Operating System :: Microsoft :: Windows",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: Internet :: WWW/HTTP",
-    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "bottle==0.13.4",
-    "waitress==3.0.2",
-    "zendriver>=0.15.3",
-    "prometheus-client==0.23.1",
-    "certifi>=2025.1.31",
-    "websockets>=15.0.1",
-    "packaging>=25.0",
-    "xvfbwrapper>=0.2.9 ; sys_platform == 'linux'",
+  "bottle==0.13.4",
+  "waitress==3.0.2",
+  "zendriver>=0.15.3",
+  "prometheus-client==0.25.0",
+  "certifi>=2025.1.31",
+  "websockets>=15.0.1",
+  "packaging>=25.0",
+  "xvfbwrapper>=0.2.9 ; sys_platform == 'linux'",
 ]
+description = "Proxy server to bypass Cloudflare and DDoS-GUARD protection"
+keywords = ["cloudflare", "bypass", "proxy", "scraping", "automation"]
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+name = "flaresolverr"
+readme = "README.md"
+requires-python = ">=3.11"
+version = "3.5.0"
 
 [project.urls]
-Homepage = "https://github.com/FlareSolverr/FlareSolverr"
 Documentation = "https://github.com/FlareSolverr/FlareSolverr#readme"
-Repository = "https://github.com/FlareSolverr/FlareSolverr"
+Homepage = "https://github.com/FlareSolverr/FlareSolverr"
 Issues = "https://github.com/FlareSolverr/FlareSolverr/issues"
+Repository = "https://github.com/FlareSolverr/FlareSolverr"
 
 [build-system]
-requires = ["hatchling"]
 build-backend = "hatchling.build"
+requires = ["hatchling"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
 [dependency-groups]
 dev = [
-    "requests>=2.34.2",
-    "ruff>=0.15.17",
-    "ty>=0.0.49",
-    "WebTest>=3.0.7",
+  "requests>=2.34.2",
+  "ruff>=0.15.17",
+  "ty>=0.0.49",
+  "WebTest>=3.0.7",
 ]
 
 [tool.uv]
@@ -64,46 +64,46 @@ package = false
 [tool.uv.sources]
 
 [tool.ruff]
+extend-exclude = [
+  "html_samples",
+  "resources",
+  "dist_chrome",
+  "build",
+]
 line-length = 120
 target-version = "py311"
-extend-exclude = [
-    "html_samples",
-    "resources",
-    "dist_chrome",
-    "build",
-]
 
 [tool.ruff.lint]
 # A reasonable, modern set of rules. Remove or adjust rules as needed.
-select = [
-    "E",      # pycodestyle errors
-    "W",      # pycodestyle warnings
-    "F",      # pyflakes
-    "I",      # isort
-    "N",      # pep8-naming
-    "UP",     # pyupgrade
-    "B",      # flake8-bugbear
-    "C4",     # flake8-comprehensions
-    "SIM",    # flake8-simplify
-    "RUF",    # ruff-specific rules
-]
 ignore = [
-    "E501",   # line too long (handled by formatter/line-length)
-    "B008",   # do not perform function calls in argument defaults (common in Pydantic/bottle)
+  "E501", # line too long (handled by formatter/line-length)
+  "B008", # do not perform function calls in argument defaults (common in Pydantic/bottle)
+]
+select = [
+  "E", # pycodestyle errors
+  "W", # pycodestyle warnings
+  "F", # pyflakes
+  "I", # isort
+  "N", # pep8-naming
+  "UP", # pyupgrade
+  "B", # flake8-bugbear
+  "C4", # flake8-comprehensions
+  "SIM", # flake8-simplify
+  "RUF", # ruff-specific rules
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"src/dtos.py" = ["N815"]  # Field names mirror the public HTTP API (userAgent, maxTimeout, ...)
-"src/tests*.py" = ["N802", "N803"]
 "src/build_package.py" = ["T201"]
+"src/dtos.py" = ["N815"] # Field names mirror the public HTTP API (userAgent, maxTimeout, ...)
+"src/tests*.py" = ["N802", "N803"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["flaresolverr", "flaresolverr_service", "sessions", "utils", "dtos", "metrics", "tests"]
 
 [tool.ruff.format]
-quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
+quote-style = "double"
 skip-magic-trailing-comma = false
 
 [tool.ty.environment]
