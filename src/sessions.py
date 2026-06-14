@@ -2,7 +2,6 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
 from uuid import uuid1
 
 import zendriver as zd
@@ -14,7 +13,7 @@ import utils
 class Session:
     session_id: str
     browser: zd.Browser
-    tab: Optional[zd.Tab] = field(default=None)
+    tab: zd.Tab | None = field(default=None)
     created_at: datetime = field(default_factory=datetime.now)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -29,8 +28,9 @@ class SessionsStorage:
         self.sessions = {}
         self._registry_lock = asyncio.Lock()
 
-    async def create(self, session_id: Optional[str] = None, proxy: Optional[dict] = None,
-                     force_new: Optional[bool] = False) -> Tuple[Session, bool]:
+    async def create(
+        self, session_id: str | None = None, proxy: dict | None = None, force_new: bool | None = False
+    ) -> tuple[Session, bool]:
         """
         Create a new browser-backed session.
 
@@ -51,7 +51,7 @@ class SessionsStorage:
             browser = await utils.get_browser(proxy)
             tab = browser.main_tab
             if tab is None:
-                tab = await browser.get('about:blank')
+                tab = await browser.get("about:blank")
             session = Session(session_id=session_id, browser=browser, tab=tab)
             self.sessions[session_id] = session
             return session, True
@@ -71,15 +71,14 @@ class SessionsStorage:
         try:
             await session.browser.stop()
         except Exception as e:
-            logging.debug('Error stopping session browser: %s', e)
+            logging.debug("Error stopping session browser: %s", e)
         return True
 
-    async def get(self, session_id: str, ttl: Optional[timedelta] = None) -> Tuple[Session, bool]:
+    async def get(self, session_id: str, ttl: timedelta | None = None) -> tuple[Session, bool]:
         session, fresh = await self.create(session_id)
 
         if ttl is not None and not fresh and session.lifetime() > ttl:
-            logging.debug(f"session's lifetime has expired, so the session is recreated "
-                          f"(session_id={session_id})")
+            logging.debug(f"session's lifetime has expired, so the session is recreated (session_id={session_id})")
             session, fresh = await self.create(session_id, force_new=True)
 
         return session, fresh

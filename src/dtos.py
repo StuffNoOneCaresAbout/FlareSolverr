@@ -1,26 +1,29 @@
-
 STATUS_OK = "ok"
 STATUS_ERROR = "error"
 
 
 class ChallengeResolutionResultT:
-    url: str = None
-    status: int = None
-    headers: list = None
-    response: str = None
-    cookies: list = None
-    userAgent: str = None
+    # Note: DTOs are populated from JSON via ``self.__dict__.update(_dict)`` in
+    # ``__init__``. Type annotations are intentionally loose because every
+    # field is ``T | None`` in practice. Add ``ty: ignore`` markers at consumer
+    # sites that access these fields.
+    url = None
+    status = None
+    headers = None
+    response = None
+    cookies = None
+    userAgent = None
     screenshot: str | None = None
-    turnstile_token: str = None
+    turnstile_token = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)
 
 
 class ChallengeResolutionT:
-    status: str = None
-    message: str = None
-    result: ChallengeResolutionResultT = None
+    status = None
+    message = None
+    result = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)
@@ -28,46 +31,46 @@ class ChallengeResolutionT:
             self.result = ChallengeResolutionResultT(self.result)
 
 
-class V1RequestBase(object):
+class V1RequestBase:
     # V1RequestBase
-    cmd: str = None
-    cookies: list = None
-    maxTimeout: int = None
-    proxy: dict = None
-    session: str = None
-    session_ttl_minutes: int = None
-    headers: list = None  # deprecated v2.0.0, not used
-    userAgent: str = None  # deprecated v2.0.0, not used
+    cmd = None
+    cookies = None
+    maxTimeout = None
+    proxy = None
+    session = None
+    session_ttl_minutes = None
+    headers = None  # deprecated v2.0.0, not used
+    userAgent = None  # deprecated v2.0.0, not used
 
     # V1Request
-    url: str = None
-    postData: str = None
-    returnOnlyCookies: bool = None
-    returnScreenshot: bool = None
-    download: bool = None   # deprecated v2.0.0, not used
-    returnRawHtml: bool = None  # deprecated v2.0.0, not used
-    waitInSeconds: int = None
+    url = None
+    postData = None
+    returnOnlyCookies = None
+    returnScreenshot = None
+    download = None  # deprecated v2.0.0, not used
+    returnRawHtml = None  # deprecated v2.0.0, not used
+    waitInSeconds = None
     # Optional resource blocking flag (blocks images, CSS, and fonts)
-    disableMedia: bool = None
+    disableMedia = None
     # Optional when you've got a turnstile captcha that needs to be clicked after X number of Tab presses
-    tabs_till_verify : int = None
+    tabs_till_verify = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)
 
 
-class V1ResponseBase(object):
+class V1ResponseBase:
     # V1ResponseBase
-    status: str = None
-    message: str = None
-    session: str = None
-    sessions: list[str] = None
-    startTimestamp: int = None
-    endTimestamp: int = None
-    version: str = None
+    status = None
+    message = None
+    session = None
+    sessions = None
+    startTimestamp = None
+    endTimestamp = None
+    version = None
 
     # V1ResponseSolution
-    solution: ChallengeResolutionResultT = None
+    solution = None
 
     # hidden vars
     __error_500__: bool = False
@@ -78,17 +81,17 @@ class V1ResponseBase(object):
             self.solution = ChallengeResolutionResultT(self.solution)
 
 
-class IndexResponse(object):
-    msg: str = None
-    version: str = None
-    userAgent: str = None
+class IndexResponse:
+    msg = None
+    version = None
+    userAgent = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)
 
 
-class HealthResponse(object):
-    status: str = None
+class HealthResponse:
+    status = None
 
     def __init__(self, _dict):
         self.__dict__.update(_dict)

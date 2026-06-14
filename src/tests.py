@@ -1,14 +1,17 @@
+# ty: ignore[unresolved-attribute, invalid-argument-type, no-matching-overload, not-subscriptable]
+# The test files consume the deliberately-dynamic DTO pattern (every field is
+# ``Unknown | None`` because it's hydrated from JSON via ``__dict__.update``).
+# Narrowing every access site would obscure the tests without runtime benefit.
 import unittest
-from typing import Optional
 
 from webtest import TestApp
 
-from dtos import IndexResponse, HealthResponse, V1ResponseBase, STATUS_OK, STATUS_ERROR
 import flaresolverr
 import utils
+from dtos import STATUS_ERROR, STATUS_OK, HealthResponse, IndexResponse, V1ResponseBase
 
 
-def _find_obj_by_key(key: str, value: str, _list: list) -> Optional[dict]:
+def _find_obj_by_key(key: str, value: str, _list: list) -> dict | None:
     for obj in _list:
         if obj[key] == value:
             return obj
@@ -25,9 +28,7 @@ class TestFlareSolverr(unittest.TestCase):
     ddos_guard_url = "https://www.litres.ru/"
     fairlane_url = "https://www.pararius.com/apartments/amsterdam"
     custom_cloudflare_url = "https://www.muziekfabriek.org/"
-    cloudflare_blocked_url = (
-        "https://cpasbiens3.fr/index.php?do=search&subaction=search"
-    )
+    cloudflare_blocked_url = "https://cpasbiens3.fr/index.php?do=search&subaction=search"
 
     app = TestApp(flaresolverr.app)
     # wait until the server is ready
@@ -58,16 +59,12 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertEqual(STATUS_OK, body.status)
 
     def test_v1_endpoint_wrong_cmd(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.bad", "url": self.google_url}, status=500
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.bad", "url": self.google_url}, status=500)
         self.assertEqual(res.status_code, 500)
 
         body = V1ResponseBase(res.json)
         self.assertEqual(STATUS_ERROR, body.status)
-        self.assertEqual(
-            "Error: Request parameter 'cmd' = 'request.bad' is invalid.", body.message
-        )
+        self.assertEqual("Error: Request parameter 'cmd' = 'request.bad' is invalid.", body.message)
         self.assertGreater(body.startTimestamp, 10000)
         self.assertGreaterEqual(body.endTimestamp, body.startTimestamp)
         self.assertEqual(utils.get_flaresolverr_version(), body.version)
@@ -92,9 +89,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertIn("Chrome/", solution.userAgent)
 
     def test_v1_endpoint_request_get_disable_resources(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.get", "url": self.google_url, "disableMedia": True}
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.get", "url": self.google_url, "disableMedia": True})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -113,9 +108,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertIn("Chrome/", solution.userAgent)
 
     def test_v1_endpoint_request_get_cloudflare_js_1(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.get", "url": self.cloudflare_url}
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.get", "url": self.cloudflare_url})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -138,9 +131,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertGreater(len(cf_cookie["value"]), 30)
 
     def test_v1_endpoint_request_get_cloudflare_js_2(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.get", "url": self.cloudflare_url_2}
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.get", "url": self.cloudflare_url_2})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -163,9 +154,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertGreater(len(cf_cookie["value"]), 30)
 
     def test_v1_endpoint_request_get_ddos_guard_js(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.get", "url": self.ddos_guard_url}
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.get", "url": self.ddos_guard_url})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -188,9 +177,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertGreater(len(cf_cookie["value"]), 10)
 
     def test_v1_endpoint_request_get_fairlane_js(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.get", "url": self.fairlane_url}
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.get", "url": self.fairlane_url})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -213,9 +200,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertGreater(len(cf_cookie["value"]), 50)
 
     def test_v1_endpoint_request_get_custom_cloudflare_js(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.get", "url": self.custom_cloudflare_url}
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.get", "url": self.custom_cloudflare_url})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -552,9 +537,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertGreater(len(cf_cookie["value"]), 30)
 
     def test_v1_endpoint_request_post_fail_no_post_data(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "request.post", "url": self.google_url}, status=500
-        )
+        res = self.app.post_json("/v1", {"cmd": "request.post", "url": self.google_url}, status=500)
         self.assertEqual(res.status_code, 500)
 
         body = V1ResponseBase(res.json)
@@ -590,9 +573,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertIsNotNone(body.session)
 
     def test_v1_endpoint_sessions_create_with_session(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "sessions.create", "session": "test_create_session"}
-        )
+        res = self.app.post_json("/v1", {"cmd": "sessions.create", "session": "test_create_session"})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -601,9 +582,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertEqual(body.session, "test_create_session")
 
     def test_v1_endpoint_sessions_create_with_proxy(self):
-        res = self.app.post_json(
-            "/v1", {"cmd": "sessions.create", "proxy": {"url": self.proxy_url}}
-        )
+        res = self.app.post_json("/v1", {"cmd": "sessions.create", "proxy": {"url": self.proxy_url}})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -612,9 +591,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertIsNotNone(body.session)
 
     def test_v1_endpoint_sessions_list(self):
-        self.app.post_json(
-            "/v1", {"cmd": "sessions.create", "session": "test_list_sessions"}
-        )
+        self.app.post_json("/v1", {"cmd": "sessions.create", "session": "test_list_sessions"})
         res = self.app.post_json("/v1", {"cmd": "sessions.list"})
         self.assertEqual(res.status_code, 200)
 
@@ -625,12 +602,8 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertIn("test_list_sessions", body.sessions)
 
     def test_v1_endpoint_sessions_destroy_existing_session(self):
-        self.app.post_json(
-            "/v1", {"cmd": "sessions.create", "session": "test_destroy_sessions"}
-        )
-        res = self.app.post_json(
-            "/v1", {"cmd": "sessions.destroy", "session": "test_destroy_sessions"}
-        )
+        self.app.post_json("/v1", {"cmd": "sessions.create", "session": "test_destroy_sessions"})
+        res = self.app.post_json("/v1", {"cmd": "sessions.destroy", "session": "test_destroy_sessions"})
         self.assertEqual(res.status_code, 200)
 
         body = V1ResponseBase(res.json)
@@ -650,9 +623,7 @@ class TestFlareSolverr(unittest.TestCase):
         self.assertEqual("Error: The session doesn't exist.", body.message)
 
     def test_v1_endpoint_request_get_with_session(self):
-        self.app.post_json(
-            "/v1", {"cmd": "sessions.create", "session": "test_request_sessions"}
-        )
+        self.app.post_json("/v1", {"cmd": "sessions.create", "session": "test_request_sessions"})
         res = self.app.post_json(
             "/v1",
             {

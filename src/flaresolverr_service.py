@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import platform
 import sys
@@ -13,37 +14,50 @@ from zendriver.core.cloudflare import (
 )
 
 import utils
-from dtos import (STATUS_ERROR, STATUS_OK, ChallengeResolutionResultT,
-                  ChallengeResolutionT, HealthResponse, IndexResponse,
-                  V1RequestBase, V1ResponseBase)
+from dtos import (
+    STATUS_ERROR,
+    STATUS_OK,
+    ChallengeResolutionResultT,
+    ChallengeResolutionT,
+    HealthResponse,
+    IndexResponse,
+    V1RequestBase,
+    V1ResponseBase,
+)
 from sessions import SessionsStorage
 
 ACCESS_DENIED_TITLES = [
     # Cloudflare
-    'Access denied',
+    "Access denied",
     # Cloudflare http://bitturk.net/ Firefox
-    'Attention Required! | Cloudflare',
+    "Attention Required! | Cloudflare",
 ]
 ACCESS_DENIED_SELECTORS = [
     # Cloudflare
-    'div.cf-error-title span.cf-code-label span',
+    "div.cf-error-title span.cf-code-label span",
     # Cloudflare http://bitturk.net/ Firefox
-    '#cf-error-details div.cf-error-overview h1',
+    "#cf-error-details div.cf-error-overview h1",
 ]
 CHALLENGE_TITLES = [
     # Cloudflare
-    'Just a moment...',
+    "Just a moment...",
     # DDoS-GUARD
-    'DDoS-Guard',
+    "DDoS-Guard",
 ]
 CHALLENGE_SELECTORS = [
     # Cloudflare
-    '#cf-challenge-running', '.ray_id', '.attack-box', '#cf-please-wait',
-    '#challenge-spinner', '#trk_jschal_js', '#turnstile-wrapper', '.lds-ring',
+    "#cf-challenge-running",
+    ".ray_id",
+    ".attack-box",
+    "#cf-please-wait",
+    "#challenge-spinner",
+    "#trk_jschal_js",
+    "#turnstile-wrapper",
+    ".lds-ring",
     # Custom CloudFlare for EbookParadijs, Film-Paleis, MuziekFabriek and Puur-Hollands
-    'td.info #js_info',
+    "td.info #js_info",
     # Fairlane / pararius.com
-    'div.vc div.text-box h2',
+    "div.vc div.text-box h2",
 ]
 
 TURNSTILE_SELECTORS = [
@@ -73,10 +87,8 @@ async def test_browser_installation():
         sys.exit(1)
     finally:
         if browser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await browser.stop()
-            except Exception:
-                pass
 
     logging.info("FlareSolverr User-Agent: " + user_agent)
     logging.info("Test successful!")
@@ -132,15 +144,15 @@ async def _controller_v1_handler(req: V1RequestBase) -> V1ResponseBase:
 
     # execute the command
     res: V1ResponseBase
-    if req.cmd == 'sessions.create':
+    if req.cmd == "sessions.create":
         res = await _cmd_sessions_create(req)
-    elif req.cmd == 'sessions.list':
+    elif req.cmd == "sessions.list":
         res = _cmd_sessions_list(req)
-    elif req.cmd == 'sessions.destroy':
+    elif req.cmd == "sessions.destroy":
         res = await _cmd_sessions_destroy(req)
-    elif req.cmd == 'request.get':
+    elif req.cmd == "request.get":
         res = await _cmd_request_get(req)
-    elif req.cmd == 'request.post':
+    elif req.cmd == "request.post":
         res = await _cmd_request_post(req)
     else:
         raise Exception(f"Request parameter 'cmd' = '{req.cmd}' is invalid.")
@@ -159,7 +171,7 @@ async def _cmd_request_get(req: V1RequestBase) -> V1ResponseBase:
     if req.download is not None:
         logging.warning("Request parameter 'download' was removed in FlareSolverr v2.")
 
-    challenge_res = await _resolve_challenge(req, 'GET')
+    challenge_res = await _resolve_challenge(req, "GET")
     res = V1ResponseBase({})
     res.status = challenge_res.status
     res.message = challenge_res.message
@@ -176,7 +188,7 @@ async def _cmd_request_post(req: V1RequestBase) -> V1ResponseBase:
     if req.download is not None:
         logging.warning("Request parameter 'download' was removed in FlareSolverr v2.")
 
-    challenge_res = await _resolve_challenge(req, 'POST')
+    challenge_res = await _resolve_challenge(req, "POST")
     res = V1ResponseBase({})
     res.status = challenge_res.status
     res.message = challenge_res.message
@@ -191,44 +203,31 @@ async def _cmd_sessions_create(req: V1RequestBase) -> V1ResponseBase:
     session_id = session.session_id
 
     if not fresh:
-        return V1ResponseBase({
-            "status": STATUS_OK,
-            "message": "Session already exists.",
-            "session": session_id
-        })
+        return V1ResponseBase({"status": STATUS_OK, "message": "Session already exists.", "session": session_id})
 
-    return V1ResponseBase({
-        "status": STATUS_OK,
-        "message": "Session created successfully.",
-        "session": session_id
-    })
+    return V1ResponseBase({"status": STATUS_OK, "message": "Session created successfully.", "session": session_id})
 
 
 def _cmd_sessions_list(req: V1RequestBase) -> V1ResponseBase:
     session_ids = SESSIONS_STORAGE.session_ids()
-    return V1ResponseBase({
-        "status": STATUS_OK,
-        "message": "",
-        "sessions": session_ids
-    })
+    return V1ResponseBase({"status": STATUS_OK, "message": "", "sessions": session_ids})
 
 
 async def _cmd_sessions_destroy(req: V1RequestBase) -> V1ResponseBase:
+    if req.session is None:
+        raise Exception("Request parameter 'session' is mandatory in 'sessions.destroy' command.")
     session_id = req.session
     existed = await SESSIONS_STORAGE.destroy(session_id)
 
     if not existed:
         raise Exception("The session doesn't exist.")
 
-    return V1ResponseBase({
-        "status": STATUS_OK,
-        "message": "The session has been removed."
-    })
+    return V1ResponseBase({"status": STATUS_OK, "message": "The session has been removed."})
 
 
 async def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolutionT:
-    timeout = int(req.maxTimeout) / 1000
-    browser: zd.Browser = None
+    timeout = int(req.maxTimeout or 60000) / 1000
+    browser: zd.Browser | None = None
     owns_browser = False
     try:
         if req.session:
@@ -239,27 +238,29 @@ async def _resolve_challenge(req: V1RequestBase, method: str) -> ChallengeResolu
             if fresh:
                 logging.debug(f"new session created to perform the request (session_id={session_id})")
             else:
-                logging.debug(f"existing session is used to perform the request (session_id={session_id}, "
-                              f"lifetime={str(session.lifetime())}, ttl={str(ttl)})")
+                logging.debug(
+                    f"existing session is used to perform the request (session_id={session_id}, "
+                    f"lifetime={session.lifetime()!s}, ttl={ttl!s})"
+                )
 
             browser = session.browser
         else:
             browser = await utils.get_browser(req.proxy)
             owns_browser = True
-            logging.debug('New instance of browser has been created to perform the request')
+            logging.debug("New instance of browser has been created to perform the request")
 
         return await asyncio.wait_for(_evil_logic(req, browser, method), timeout=timeout)
-    except asyncio.TimeoutError:
-        raise Exception(f'Error solving the challenge. Timeout after {timeout} seconds.')
+    except TimeoutError:
+        raise Exception(f"Error solving the challenge. Timeout after {timeout} seconds.") from None
     except Exception as e:
-        raise Exception('Error solving the challenge. ' + str(e).replace('\n', '\\n'))
+        raise Exception("Error solving the challenge. " + str(e).replace("\n", "\\n")) from e
     finally:
         if owns_browser and browser is not None:
             try:
                 await browser.stop()
             except Exception as e:
-                logging.debug('Error closing browser: %s', e)
-            logging.debug('A used instance of browser has been destroyed')
+                logging.debug("Error closing browser: %s", e)
+            logging.debug("A used instance of browser has been destroyed")
 
 
 async def _block_media(tab: zd.Tab) -> None:
@@ -270,27 +271,65 @@ async def _block_media(tab: zd.Tab) -> None:
     """
     block_urls = [
         # Images
-        "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.bmp", "*.svg", "*.ico",
-        "*.PNG", "*.JPG", "*.JPEG", "*.GIF", "*.WEBP", "*.BMP", "*.SVG", "*.ICO",
-        "*.tiff", "*.tif", "*.jpe", "*.apng", "*.avif", "*.heic", "*.heif",
-        "*.TIFF", "*.TIF", "*.JPE", "*.APNG", "*.AVIF", "*.HEIC", "*.HEIF",
+        "*.png",
+        "*.jpg",
+        "*.jpeg",
+        "*.gif",
+        "*.webp",
+        "*.bmp",
+        "*.svg",
+        "*.ico",
+        "*.PNG",
+        "*.JPG",
+        "*.JPEG",
+        "*.GIF",
+        "*.WEBP",
+        "*.BMP",
+        "*.SVG",
+        "*.ICO",
+        "*.tiff",
+        "*.tif",
+        "*.jpe",
+        "*.apng",
+        "*.avif",
+        "*.heic",
+        "*.heif",
+        "*.TIFF",
+        "*.TIF",
+        "*.JPE",
+        "*.APNG",
+        "*.AVIF",
+        "*.HEIC",
+        "*.HEIF",
         # Stylesheets
         "*.css",
         "*.CSS",
         # Fonts
-        "*.woff", "*.woff2", "*.ttf", "*.otf", "*.eot",
-        "*.WOFF", "*.WOFF2", "*.TTF", "*.OTF", "*.EOT",
+        "*.woff",
+        "*.woff2",
+        "*.ttf",
+        "*.otf",
+        "*.eot",
+        "*.WOFF",
+        "*.WOFF2",
+        "*.TTF",
+        "*.OTF",
+        "*.EOT",
     ]
     try:
         await tab.send(network.enable())
-        await tab.send(network.set_blocked_urls(urls=block_urls))
-        logging.debug("Network.setBlockedURLs applied")
+        # ``set_blocked_urls`` is a newer CDP method that may not be present in
+        # older zendriver versions or in ty's stubs.
+        set_blocked_urls = getattr(network, "set_blocked_urls", None)
+        if set_blocked_urls is not None:
+            await tab.send(set_blocked_urls(urls=block_urls))
+            logging.debug("Network.setBlockedURLs applied")
     except Exception as e:
         logging.debug("Network.setBlockedURLs failed or unsupported: %s", e)
 
 
 async def _is_access_denied(tab: zd.Tab) -> bool:
-    page_title = tab.title or ''
+    page_title = tab.title or ""
     for title in ACCESS_DENIED_TITLES:
         if page_title.startswith(title):
             return True
@@ -305,7 +344,7 @@ async def _is_access_denied(tab: zd.Tab) -> bool:
 
 
 async def _has_challenge(tab: zd.Tab) -> bool:
-    page_title = tab.title or ''
+    page_title = tab.title or ""
     for title in CHALLENGE_TITLES:
         if title.lower() == page_title.lower():
             return True
@@ -316,9 +355,7 @@ async def _has_challenge(tab: zd.Tab) -> bool:
                 return True
         except Exception:
             continue
-    if await cf_is_interactive_challenge_present(tab, timeout=0.5):
-        return True
-    return False
+    return await cf_is_interactive_challenge_present(tab, timeout=0.5)
 
 
 async def _wait_challenge_gone(tab: zd.Tab, max_attempts: int = 30) -> None:
@@ -329,11 +366,8 @@ async def _wait_challenge_gone(tab: zd.Tab, max_attempts: int = 30) -> None:
     """
     for attempt in range(1, max_attempts + 1):
         await asyncio.sleep(SHORT_TIMEOUT)
-        page_title = (tab.title or '').lower()
-        if page_title and not any(t.lower() == page_title for t in CHALLENGE_TITLES):
-            title_gone = True
-        else:
-            title_gone = False
+        page_title = (tab.title or "").lower()
+        title_gone = bool(page_title and not any(t.lower() == page_title for t in CHALLENGE_TITLES))
         selector_gone = True
         for selector in CHALLENGE_SELECTORS:
             try:
@@ -357,8 +391,9 @@ async def _resolve_turnstile_captcha(req: V1RequestBase, tab: zd.Tab):
     if req.tabs_till_verify is None:
         return None
 
+    assert req.url is not None
     logging.debug(f"Navigating to... {req.url} in order to pass the turnstile challenge")
-    proxy_url = (req.proxy or {}).get('url') if req.proxy else None
+    proxy_url = (req.proxy or {}).get("url") if req.proxy else None
     await utils.navigate_or_raise(tab, req.url, proxy_url=proxy_url)
 
     turnstile_challenge_found = False
@@ -372,19 +407,19 @@ async def _resolve_turnstile_captcha(req: V1RequestBase, tab: zd.Tab):
         except Exception:
             continue
     if not turnstile_challenge_found:
-        logging.debug('Turnstile challenge not found')
+        logging.debug("Turnstile challenge not found")
         return None
 
     return await _click_turnstile_until_token(tab, num_tabs=req.tabs_till_verify)
 
 
-async def _click_turnstile_until_token(tab: zd.Tab, num_tabs: int) -> str:
+async def _click_turnstile_until_token(tab: zd.Tab, num_tabs: int) -> str | None:
     try:
         token_input = await tab.select("input[name='cf-turnstile-response']", timeout=5)
     except Exception:
         logging.debug("Could not find the cf-turnstile-response input")
         return None
-    current_value = await token_input.get_attribute('value') or ''
+    current_value = await token_input.get_attribute("value") or ""
     start = time.monotonic()
     timeout_s = 60.0
     while time.monotonic() - start < timeout_s:
@@ -393,15 +428,15 @@ async def _click_turnstile_until_token(tab: zd.Tab, num_tabs: int) -> str:
         except Exception:
             logging.debug("click_verify failed", exc_info=True)
         try:
-            turnstile_token = (await token_input.get_attribute('value')) or ''
+            turnstile_token = (await token_input.get_attribute("value")) or ""
         except Exception:
-            turnstile_token = ''
+            turnstile_token = ""
         if turnstile_token and turnstile_token != current_value:
             logging.info(f"Turnstile token: {turnstile_token}")
             return turnstile_token
         logging.debug("Failed to extract token, possibly click failed")
         # reset focus and try again
-        try:
+        with contextlib.suppress(Exception):
             await tab.evaluate("""
                 let el = document.createElement('button');
                 el.style.position='fixed';
@@ -410,8 +445,6 @@ async def _click_turnstile_until_token(tab: zd.Tab, num_tabs: int) -> str:
                 document.body.prepend(el);
                 el.focus();
             """)
-        except Exception:
-            pass
         await asyncio.sleep(1)
     logging.debug("Timed out trying to obtain Turnstile token")
     return None
@@ -427,31 +460,37 @@ async def _click_verify(tab: zd.Tab, num_tabs: int = 1) -> None:
     try:
         logging.debug("Try to find the Cloudflare verify checkbox...")
         for _ in range(num_tabs):
-            await tab.send(input_.dispatch_key_event(
-                type_='rawKeyDown',
-                key='Tab',
-                code='Tab',
-                windows_virtual_key_code=9,
-                native_virtual_key_code=9,
-            ))
-            await tab.send(input_.dispatch_key_event(
-                type_='keyUp',
-                key='Tab',
-                code='Tab',
-                windows_virtual_key_code=9,
-                native_virtual_key_code=9,
-            ))
+            await tab.send(
+                input_.dispatch_key_event(
+                    type_="rawKeyDown",
+                    key="Tab",
+                    code="Tab",
+                    windows_virtual_key_code=9,
+                    native_virtual_key_code=9,
+                )
+            )
+            await tab.send(
+                input_.dispatch_key_event(
+                    type_="keyUp",
+                    key="Tab",
+                    code="Tab",
+                    windows_virtual_key_code=9,
+                    native_virtual_key_code=9,
+                )
+            )
             await asyncio.sleep(0.1)
         await asyncio.sleep(1)
-        await tab.send(input_.dispatch_key_event(
-            type_='char',
-            text=' ',
-            unmodified_text=' ',
-            key=' ',
-            code='Space',
-            windows_virtual_key_code=32,
-            native_virtual_key_code=32,
-        ))
+        await tab.send(
+            input_.dispatch_key_event(
+                type_="char",
+                text=" ",
+                unmodified_text=" ",
+                key=" ",
+                code="Space",
+                windows_virtual_key_code=32,
+                native_virtual_key_code=32,
+            )
+        )
         logging.debug(f"Cloudflare verify checkbox clicked after {num_tabs} tabs!")
     except Exception:
         logging.debug("Cloudflare verify checkbox not found on the page.", exc_info=True)
@@ -483,7 +522,7 @@ async def _evil_logic(req: V1RequestBase, browser: zd.Browser, method: str) -> C
     # session-less requests where a brand-new browser is created anyway).
     tab = browser.main_tab
     if tab is None:
-        tab = await browser.get('about:blank')
+        tab = await browser.get("about:blank")
 
     # optionally block resources like images/css/fonts using CDP
     disable_media = utils.get_config_disable_media()
@@ -500,21 +539,23 @@ async def _evil_logic(req: V1RequestBase, browser: zd.Browser, method: str) -> C
         await _post_request(req, tab)
     else:
         if req.tabs_till_verify is None:
-            proxy_url = (req.proxy or {}).get('url') if req.proxy else None
+            proxy_url = (req.proxy or {}).get("url") if req.proxy else None
+            assert req.url is not None
             await utils.navigate_or_raise(tab, req.url, proxy_url=proxy_url)
         else:
             turnstile_token = await _resolve_turnstile_captcha(req, tab)
 
     # set cookies if required
     if req.cookies is not None and len(req.cookies) > 0:
-        logging.debug('Setting cookies...')
+        logging.debug("Setting cookies...")
         await utils.apply_request_cookies(tab, req.cookies)
         # reload the page
-        if method == 'POST':
+        if method == "POST":
             await _post_request(req, tab)
         else:
-            proxy_url = (req.proxy or {}).get('url') if req.proxy else None
-    await utils.navigate_or_raise(tab, req.url, proxy_url=proxy_url)
+            proxy_url = (req.proxy or {}).get("url") if req.proxy else None
+            assert req.url is not None
+            await utils.navigate_or_raise(tab, req.url, proxy_url=proxy_url)
 
     # wait for the page
     if utils.get_config_log_html():
@@ -525,14 +566,15 @@ async def _evil_logic(req: V1RequestBase, browser: zd.Browser, method: str) -> C
             logging.debug("Could not read page source for LOG_HTML")
 
     if await _is_access_denied(tab):
-        raise Exception('Cloudflare has blocked this request. '
-                        'Probably your IP is banned for this site, check in your web browser.')
+        raise Exception(
+            "Cloudflare has blocked this request. Probably your IP is banned for this site, check in your web browser."
+        )
 
     challenge_found = await _has_challenge(tab)
     if challenge_found:
         logging.info("Challenge detected. Attempting to solve with zendriver.verify_cf")
         try:
-            await verify_cf(tab, timeout=int(req.maxTimeout) / 1000, click_delay=5)
+            await verify_cf(tab, timeout=int(req.maxTimeout or 60000) / 1000, click_delay=5)
         except TimeoutError:
             logging.debug("verify_cf timed out, retrying with click_verify as a fallback")
         except Exception as e:
@@ -557,7 +599,8 @@ async def _evil_logic(req: V1RequestBase, browser: zd.Browser, method: str) -> C
     # collect the challenge solution
     challenge_res = ChallengeResolutionResultT({})
     try:
-        challenge_res.url = tab.url
+        if tab.url is not None:
+            challenge_res.url = tab.url
     except Exception:
         challenge_res.url = req.url
     challenge_res.status = 200  # todo: real status from the network stack
@@ -568,23 +611,22 @@ async def _evil_logic(req: V1RequestBase, browser: zd.Browser, method: str) -> C
         logging.debug("Could not read cookies: %s", e)
         challenge_res.cookies = []
     challenge_res.userAgent = await utils.get_user_agent(browser)
-    challenge_res.turnstile_token = turnstile_token
+    challenge_res.turnstile_token = turnstile_token or ""
 
     if not req.returnOnlyCookies:
         challenge_res.headers = {}  # todo: extract headers from a fetch interceptor
         if req.waitInSeconds and req.waitInSeconds > 0:
-            logging.info("Waiting " + str(req.waitInSeconds) +
-                         " seconds before returning the response...")
+            logging.info("Waiting " + str(req.waitInSeconds) + " seconds before returning the response...")
             await asyncio.sleep(req.waitInSeconds)
         try:
             challenge_res.response = await tab.get_content()
         except Exception as e:
             logging.debug("Could not read page source: %s", e)
-            challenge_res.response = ''
+            challenge_res.response = ""
 
     if req.returnScreenshot:
         try:
-            challenge_res.screenshot = await tab.screenshot_b64(format='png')
+            challenge_res.screenshot = await tab.screenshot_b64(format="png")
         except Exception as e:
             logging.debug("Could not take screenshot: %s", e)
 
@@ -593,6 +635,8 @@ async def _evil_logic(req: V1RequestBase, browser: zd.Browser, method: str) -> C
 
 
 async def _post_request(req: V1RequestBase, tab: zd.Tab):
+    assert req.url is not None
+    assert req.postData is not None
     html_content = utils.render_post_form_html(req.url, req.postData)
     data_url = "data:text/html;charset=utf-8," + html_content
     await tab.get(data_url)
